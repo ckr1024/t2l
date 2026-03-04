@@ -177,3 +177,50 @@ class GPT4oBenchmarkConfig(ConfigOurs):
 
     openai_api_key: Optional[str] = None
     openai_model: str = "gpt-4o"
+
+
+# ============================================================
+# Hyperbolic Variants (Improvement over original ToMe)
+# ============================================================
+
+@dataclass
+class HyperbolicConfigOurs(ConfigOurs):
+    """Full ToMe with hyperbolic operations (our improvement)."""
+    use_hyperbolic: bool = True
+    hyperbolic_curvature: float = 1.0
+    output_path: Path = Path("./experiment_results/hyperbolic/config_Ours")
+
+
+@dataclass
+class HyperbolicConfigB(ConfigB):
+    """ToMe + ETS only, with hyperbolic token merging."""
+    use_hyperbolic: bool = True
+    hyperbolic_curvature: float = 1.0
+    output_path: Path = Path("./experiment_results/hyperbolic/config_B")
+
+
+@dataclass
+class HyperbolicConfigC(ConfigC):
+    """ToMe + ETS + Lent, with hyperbolic operations."""
+    use_hyperbolic: bool = True
+    hyperbolic_curvature: float = 1.0
+    output_path: Path = Path("./experiment_results/hyperbolic/config_C")
+
+
+@dataclass
+class HyperbolicConfigF(ConfigF):
+    """ToMe + ETS + Lsem, with hyperbolic operations."""
+    use_hyperbolic: bool = True
+    hyperbolic_curvature: float = 1.0
+    output_path: Path = Path("./experiment_results/hyperbolic/config_F")
+
+
+HYPERBOLIC_CONFIGS = {
+    "Hyp-B": HyperbolicConfigB,
+    "Hyp-C": HyperbolicConfigC,
+    "Hyp-F": HyperbolicConfigF,
+    "Hyp-Ours": HyperbolicConfigOurs,
+}
+
+# Merge all configs for unified access
+ALL_CONFIGS = {**ABLATION_CONFIGS, **HYPERBOLIC_CONFIGS}

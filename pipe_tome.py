@@ -21,6 +21,10 @@ from diffusers.pipelines.stable_diffusion_xl.pipeline_output import (
 from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipeline
 
 from utils.ptp_utils import AttentionStore, aggregate_attention, register_self_time
+from utils.hyperbolic_utils import (
+    token_merge_hyperbolic, hyperbolic_spatial_loss,
+    compute_hyperbolic_entropy_loss, compute_hyperbolic_pose_loss,
+)
 from torchvision import transforms as T
 
 
@@ -235,7 +239,11 @@ class tomePipeline(StableDiffusionXLPipeline):
         )
         cross_map = cross_map / cross_map.sum(dim=(0, 1), keepdim=True)
 
-        loss = loss - 2 * (cross_map * torch.log(cross_map + 1e-5)).sum()
+        if getattr(self, '_use_hyperbolic', False):
+            _c = getattr(self, '_hyperbolic_curvature', 1.0)
+            loss = loss + compute_hyperbolic_entropy_loss(cross_map, _c)
+        else:
+            loss = loss - 2 * (cross_map * torch.log(cross_map + 1e-5)).sum()
         if pose_loss:
             idx = 0
             for subject_idx, subject_idx2 in [indices]:
@@ -260,8 +268,12 @@ class tomePipeline(StableDiffusionXLPipeline):
 
                 pos2 = torch.tensor([25.0, 16]).to("cuda")
 
-                loss = loss + (0.2 * (pair_pos[0] - pos1) ** 2).mean()
-                loss = loss + (0.2 * (pair_pos[1] - pos2) ** 2).mean()
+                if getattr(self, '_use_hyperbolic', False):
+                    _c = getattr(self, '_hyperbolic_curvature', 1.0)
+                    loss = loss + compute_hyperbolic_pose_loss(pair_pos, pos1, pos2, 32.0, _c)
+                else:
+                    loss = loss + (0.2 * (pair_pos[0] - pos1) ** 2).mean()
+                    loss = loss + (0.2 * (pair_pos[1] - pos2) ** 2).mean()
 
                 T.ToPILImage()(sub_map.reshape(1, 32, 32)).save("mask_left.png")
                 T.ToPILImage()(sub_map2.reshape(1, 32, 32)).save("mask_right.png")
@@ -387,7 +399,11 @@ class tomePipeline(StableDiffusionXLPipeline):
                 added_cond_kwargs=self.added_cond_kwargs2,
             ).sample
 
-            loss = torch.nn.functional.mse_loss(noise_pred_anchor, noise_pred_token)
+            if getattr(self, '_use_hyperbolic', False):
+                _c = getattr(self, '_hyperbolic_curvature', 1.0)
+                loss = hyperbolic_spatial_loss(noise_pred_anchor, noise_pred_token, _c)
+            else:
+                loss = torch.nn.functional.mse_loss(noise_pred_anchor, noise_pred_token)
 
             stoken = self._update_stoken(stoken, loss, 10000)
             if iteration >= iter_num:
@@ -496,6 +512,8 @@ class tomePipeline(StableDiffusionXLPipeline):
         use_pose_loss = kwargs.get("use_pose_loss")
         use_token_merge = kwargs.get("use_token_merge", True)
         use_ets = kwargs.get("use_ets", True)
+        use_hyperbolic = kwargs.get("use_hyperbolic", False)
+        hyperbolic_curvature = kwargs.get("hyperbolic_curvature", 1.0)
 
         # 0. Default height and width to unet
         height = height or self.default_sample_size * self.vae_scale_factor
@@ -529,6 +547,8 @@ class tomePipeline(StableDiffusionXLPipeline):
         self._cross_attention_kwargs = cross_attention_kwargs
         self._denoising_end = denoising_end
         self._interrupt = False
+        self._use_hyperbolic = use_hyperbolic
+        self._hyperbolic_curvature = hyperbolic_curvature
 
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
@@ -617,7 +637,12 @@ class tomePipeline(StableDiffusionXLPipeline):
         # -----------------------------------
         # token merge
         if not run_standard_sd and token_refinement_steps and use_token_merge:
-            prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
+            if use_hyperbolic:
+                prompt_embeds[0] = token_merge_hyperbolic(
+                    prompt_embeds[0], indices_to_alter, hyperbolic_curvature
+                )
+            else:
+                prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(

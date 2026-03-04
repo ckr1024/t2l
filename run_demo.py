@@ -101,6 +101,8 @@ def run_on_prompt(
         use_pose_loss=config.use_pose_loss,
         use_token_merge=getattr(config, "use_token_merge", True),
         use_ets=getattr(config, "use_ets", True),
+        use_hyperbolic=getattr(config, "use_hyperbolic", False),
+        hyperbolic_curvature=getattr(config, "hyperbolic_curvature", 1.0),
         negative_prompt="low res, ugly, blurry, artifact, unreal",
     )
     image = outputs.images[0]
