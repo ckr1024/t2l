@@ -216,6 +216,8 @@ def run_attention_visualization(
                 visualize_indices.append(idx_list)
     visualize_indices = sorted(set(visualize_indices))
 
+    fallback_needed = not token_indices or not prompt_anchor
+
     all_attention_images = {}
 
     for config_name in config_names:
@@ -234,18 +236,28 @@ def run_attention_visualization(
         config.prompt_merged = " and ".join([f"a {n}" for n in merged_parts[:2]]) or prompt
         config.prompt_length = len(model.tokenizer(prompt)["input_ids"]) - 2
 
+        orig_std = config.run_standard_sd
+        if fallback_needed:
+            config.run_standard_sd = True
+
         g = torch.Generator("cuda").manual_seed(seed)
         controller = AttentionStore(save_global_store=True)
+
+        use_indices = token_indices if token_indices else [[0], [0]]
+        use_anchor = prompt_anchor if prompt_anchor else [prompt]
 
         image = run_on_prompt(
             prompt=prompt,
             model=model,
             controller=controller,
-            token_indices=token_indices,
-            prompt_anchor=prompt_anchor,
+            token_indices=use_indices,
+            prompt_anchor=use_anchor,
             seed=g,
             config=config,
         )
+
+        if fallback_needed:
+            config.run_standard_sd = orig_std
 
         config_dir = os.path.join(output_dir, f"config_{config_name}")
         os.makedirs(config_dir, exist_ok=True)

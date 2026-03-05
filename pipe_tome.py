@@ -781,11 +781,14 @@ class tomePipeline(StableDiffusionXLPipeline):
                     if self.do_classifier_free_guidance
                     else latents
                 )
-                latent_anchor = (
-                    torch.cat([latents] * len(panchors))
-                    if latent_anchor is None
-                    else latent_anchor
-                )
+                if panchors:
+                    latent_anchor = (
+                        torch.cat([latents] * len(panchors))
+                        if latent_anchor is None
+                        else latent_anchor
+                    )
+                else:
+                    latent_anchor = latents.clone()
 
                 latent_model_input = self.scheduler.scale_model_input(
                     latent_model_input, t

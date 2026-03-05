@@ -115,6 +115,8 @@ def filter_text(token_indices, prompt_anchor):
     for i, idx in enumerate(token_indices):
         if len(idx[1]) == 0:
             continue
+        if i >= len(prompt_anchor):
+            break
         final_idx.append(idx)
         final_prompt.append(prompt_anchor[i])
     return final_idx, final_prompt
