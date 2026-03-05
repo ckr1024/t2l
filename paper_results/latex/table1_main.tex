@@ -1,0 +1,14 @@
+\begin{table}[t]
+\centering
+\caption{Attribute binding performance comparison on T2I-CompBench. We report BLIP-VQA scores for color, shape, and texture binding, along with the ImageReward score. Best results are in \textbf{bold}.}
+\label{tab:main_comparison}
+\begin{tabular}{l|ccc|c|c}
+\toprule
+Method & Color$\uparrow$ & Shape$\uparrow$ & Texture$\uparrow$ & Avg$\uparrow$ & ImgRwd$\uparrow$ \\
+\midrule
+SDXL (baseline) & 0.2442$\pm$0.3814 & 0.4356$\pm$0.4648 & 0.2061$\pm$0.3970 & 0.2953 & -- \\
+ToMe (Eucl.) & 0.2308$\pm$0.3880 & 0.4439$\pm$0.4588 & \textbf{0.2101$\pm$0.3953} & 0.2949 & -- \\
+ToMe (Hyp.) & \textbf{0.4020$\pm$0.4882} & \textbf{0.4580$\pm$0.4464} & 0.0550$\pm$0.1028 & \textbf{0.3050} & -- \\
+\bottomrule
+\end{tabular}
+\end{table}
