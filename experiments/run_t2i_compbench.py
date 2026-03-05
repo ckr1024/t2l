@@ -1,10 +1,13 @@
 """
 T2I-CompBench Evaluation Script
 
-Evaluates ToMe on the T2I-CompBench benchmark for attribute binding:
+Evaluates ToMe on the official T2I-CompBench benchmark for attribute binding:
   - Color binding (300 prompts)
   - Shape binding (300 prompts)
   - Texture binding (300 prompts)
+
+Dataset: Karine-Huang/T2I-CompBench (NeurIPS 2023)
+         https://github.com/Karine-Huang/T2I-CompBench
 
 Metrics: BLIP-VQA score, ImageReward score
 
@@ -26,122 +29,75 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from configs.experiment_config import T2ICompBenchConfig
 from experiments.eval_metrics import BLIPVQAEvaluator, ImageRewardEvaluator, save_evaluation_results
+from experiments.parse_compbench import parse_compbench_prompt
 
 
-# ============================================================
-# T2I-CompBench Prompt Templates
-# ============================================================
+DEFAULT_DATA_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data", "t2i_compbench",
+)
 
-COLOR_PROMPTS = [
-    ("a red apple and a green pear", [{"object": "apple", "attribute": "red"}, {"object": "pear", "attribute": "green"}]),
-    ("a blue car and a red bus", [{"object": "car", "attribute": "blue"}, {"object": "bus", "attribute": "red"}]),
-    ("a yellow cat and a black dog", [{"object": "cat", "attribute": "yellow"}, {"object": "dog", "attribute": "black"}]),
-    ("a white horse and a brown cow", [{"object": "horse", "attribute": "white"}, {"object": "cow", "attribute": "brown"}]),
-    ("a pink flower and a purple butterfly", [{"object": "flower", "attribute": "pink"}, {"object": "butterfly", "attribute": "purple"}]),
-    ("a red hat and a blue scarf", [{"object": "hat", "attribute": "red"}, {"object": "scarf", "attribute": "blue"}]),
-    ("a green frog and a yellow bird", [{"object": "frog", "attribute": "green"}, {"object": "bird", "attribute": "yellow"}]),
-    ("a black cat and a white rabbit", [{"object": "cat", "attribute": "black"}, {"object": "rabbit", "attribute": "white"}]),
-    ("a silver ring and a gold bracelet", [{"object": "ring", "attribute": "silver"}, {"object": "bracelet", "attribute": "gold"}]),
-    ("a red rose and a white lily", [{"object": "rose", "attribute": "red"}, {"object": "lily", "attribute": "white"}]),
-    ("a blue bird and a red fish", [{"object": "bird", "attribute": "blue"}, {"object": "fish", "attribute": "red"}]),
-    ("a orange cat and a gray mouse", [{"object": "cat", "attribute": "orange"}, {"object": "mouse", "attribute": "gray"}]),
-    ("a white swan and a black crow", [{"object": "swan", "attribute": "white"}, {"object": "crow", "attribute": "black"}]),
-    ("a red ball and a blue cube", [{"object": "ball", "attribute": "red"}, {"object": "cube", "attribute": "blue"}]),
-    ("a green tree and a brown fence", [{"object": "tree", "attribute": "green"}, {"object": "fence", "attribute": "brown"}]),
-    ("a yellow banana and a red strawberry", [{"object": "banana", "attribute": "yellow"}, {"object": "strawberry", "attribute": "red"}]),
-    ("a purple grape and a orange tangerine", [{"object": "grape", "attribute": "purple"}, {"object": "tangerine", "attribute": "orange"}]),
-    ("a white cloud and a blue sky", [{"object": "cloud", "attribute": "white"}, {"object": "sky", "attribute": "blue"}]),
-    ("a red fire truck and a yellow taxi", [{"object": "fire truck", "attribute": "red"}, {"object": "taxi", "attribute": "yellow"}]),
-    ("a black bear and a white polar bear", [{"object": "bear", "attribute": "black"}, {"object": "polar bear", "attribute": "white"}]),
-]
 
-SHAPE_PROMPTS = [
-    ("a round clock and a square frame", [{"object": "clock", "attribute": "round"}, {"object": "frame", "attribute": "square"}]),
-    ("a triangular roof and a rectangular door", [{"object": "roof", "attribute": "triangular"}, {"object": "door", "attribute": "rectangular"}]),
-    ("a round ball and a square box", [{"object": "ball", "attribute": "round"}, {"object": "box", "attribute": "square"}]),
-    ("a cylindrical vase and a spherical lamp", [{"object": "vase", "attribute": "cylindrical"}, {"object": "lamp", "attribute": "spherical"}]),
-    ("a curved bridge and a straight road", [{"object": "bridge", "attribute": "curved"}, {"object": "road", "attribute": "straight"}]),
-    ("a round plate and a rectangular tray", [{"object": "plate", "attribute": "round"}, {"object": "tray", "attribute": "rectangular"}]),
-    ("a oval mirror and a square window", [{"object": "mirror", "attribute": "oval"}, {"object": "window", "attribute": "square"}]),
-    ("a circular rug and a rectangular carpet", [{"object": "rug", "attribute": "circular"}, {"object": "carpet", "attribute": "rectangular"}]),
-    ("a round table and a long bench", [{"object": "table", "attribute": "round"}, {"object": "bench", "attribute": "long"}]),
-    ("a flat screen and a curved monitor", [{"object": "screen", "attribute": "flat"}, {"object": "monitor", "attribute": "curved"}]),
-    ("a round cookie and a square cracker", [{"object": "cookie", "attribute": "round"}, {"object": "cracker", "attribute": "square"}]),
-    ("a tall tower and a wide bridge", [{"object": "tower", "attribute": "tall"}, {"object": "bridge", "attribute": "wide"}]),
-    ("a thin pencil and a thick marker", [{"object": "pencil", "attribute": "thin"}, {"object": "marker", "attribute": "thick"}]),
-    ("a round wheel and a square block", [{"object": "wheel", "attribute": "round"}, {"object": "block", "attribute": "square"}]),
-    ("a star shaped cookie and a heart shaped candy", [{"object": "cookie", "attribute": "star shaped"}, {"object": "candy", "attribute": "heart shaped"}]),
-    ("a spiral staircase and a straight ladder", [{"object": "staircase", "attribute": "spiral"}, {"object": "ladder", "attribute": "straight"}]),
-    ("a round pizza and a triangular slice", [{"object": "pizza", "attribute": "round"}, {"object": "slice", "attribute": "triangular"}]),
-    ("a flat pancake and a round donut", [{"object": "pancake", "attribute": "flat"}, {"object": "donut", "attribute": "round"}]),
-    ("a square tile and a hexagonal pattern", [{"object": "tile", "attribute": "square"}, {"object": "pattern", "attribute": "hexagonal"}]),
-    ("a round coin and a rectangular bill", [{"object": "coin", "attribute": "round"}, {"object": "bill", "attribute": "rectangular"}]),
-]
+def _ensure_dataset(data_dir: str = DEFAULT_DATA_DIR) -> str:
+    """Auto-download T2I-CompBench dataset if not present."""
+    required = [f"{s}_val.txt" for s in ("color", "shape", "texture")]
+    all_exist = all(
+        os.path.exists(os.path.join(data_dir, f)) for f in required
+    )
+    if all_exist:
+        return data_dir
 
-TEXTURE_PROMPTS = [
-    ("a fluffy cat and a smooth dog", [{"object": "cat", "attribute": "fluffy"}, {"object": "dog", "attribute": "smooth"}]),
-    ("a wooden table and a metal chair", [{"object": "table", "attribute": "wooden"}, {"object": "chair", "attribute": "metal"}]),
-    ("a glossy car and a matte truck", [{"object": "car", "attribute": "glossy"}, {"object": "truck", "attribute": "matte"}]),
-    ("a rough stone and a smooth pebble", [{"object": "stone", "attribute": "rough"}, {"object": "pebble", "attribute": "smooth"}]),
-    ("a furry teddy bear and a plastic robot", [{"object": "teddy bear", "attribute": "furry"}, {"object": "robot", "attribute": "plastic"}]),
-    ("a leather jacket and a cotton shirt", [{"object": "jacket", "attribute": "leather"}, {"object": "shirt", "attribute": "cotton"}]),
-    ("a velvet curtain and a silk pillow", [{"object": "curtain", "attribute": "velvet"}, {"object": "pillow", "attribute": "silk"}]),
-    ("a glass bottle and a ceramic cup", [{"object": "bottle", "attribute": "glass"}, {"object": "cup", "attribute": "ceramic"}]),
-    ("a knitted sweater and a woven basket", [{"object": "sweater", "attribute": "knitted"}, {"object": "basket", "attribute": "woven"}]),
-    ("a sandy beach and a rocky cliff", [{"object": "beach", "attribute": "sandy"}, {"object": "cliff", "attribute": "rocky"}]),
-    ("a metallic robot and a wooden puppet", [{"object": "robot", "attribute": "metallic"}, {"object": "puppet", "attribute": "wooden"}]),
-    ("a shiny diamond and a rough coal", [{"object": "diamond", "attribute": "shiny"}, {"object": "coal", "attribute": "rough"}]),
-    ("a woolen hat and a straw basket", [{"object": "hat", "attribute": "woolen"}, {"object": "basket", "attribute": "straw"}]),
-    ("a rubber ball and a leather glove", [{"object": "ball", "attribute": "rubber"}, {"object": "glove", "attribute": "leather"}]),
-    ("a marble statue and a bronze medal", [{"object": "statue", "attribute": "marble"}, {"object": "medal", "attribute": "bronze"}]),
-    ("a feathery pillow and a stone floor", [{"object": "pillow", "attribute": "feathery"}, {"object": "floor", "attribute": "stone"}]),
-    ("a silky dress and a denim jacket", [{"object": "dress", "attribute": "silky"}, {"object": "jacket", "attribute": "denim"}]),
-    ("a porcelain vase and a iron gate", [{"object": "vase", "attribute": "porcelain"}, {"object": "gate", "attribute": "iron"}]),
-    ("a crystal glass and a wooden mug", [{"object": "glass", "attribute": "crystal"}, {"object": "mug", "attribute": "wooden"}]),
-    ("a fuzzy carpet and a polished floor", [{"object": "carpet", "attribute": "fuzzy"}, {"object": "floor", "attribute": "polished"}]),
-]
-
-PROMPT_SETS = {
-    "color": COLOR_PROMPTS,
-    "shape": SHAPE_PROMPTS,
-    "texture": TEXTURE_PROMPTS,
-}
+    print(f"T2I-CompBench data not found at {data_dir}, downloading...")
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    from data.download_t2i_compbench import download_dataset
+    return download_dataset(data_dir)
 
 
 def load_t2i_compbench_prompts(
-    subset: str, num_prompts: int = 300, data_dir: Optional[str] = None
+    subset: str,
+    num_prompts: int = 300,
+    data_dir: Optional[str] = None,
 ) -> List[tuple]:
     """
-    Load T2I-CompBench prompts. Tries to load from:
-    1. Local data directory (if provided)
-    2. HuggingFace dataset
-    3. Built-in prompt templates (fallback)
+    Load official T2I-CompBench validation prompts with parsed attribute annotations.
+
+    Loads from local files (auto-downloaded from GitHub if needed).
+    Each prompt is automatically parsed to extract (object, attribute) pairs
+    for BLIP-VQA evaluation.
+
+    Args:
+        subset: "color", "shape", or "texture"
+        num_prompts: Max number of prompts to load (default 300 = full set)
+        data_dir: Override directory for dataset files
+
+    Returns:
+        List of (prompt_text, attr_list) tuples where attr_list contains
+        dicts with "object" and "attribute" keys.
     """
-    if data_dir:
-        filepath = os.path.join(data_dir, f"{subset}_val.txt")
-        if os.path.exists(filepath):
-            print(f"Loading prompts from {filepath}")
-            with open(filepath, "r") as f:
-                lines = [l.strip() for l in f.readlines() if l.strip()]
-            return [(line, []) for line in lines[:num_prompts]]
+    data_dir = data_dir or DEFAULT_DATA_DIR
+    data_dir = _ensure_dataset(data_dir)
 
-    try:
-        from datasets import load_dataset
+    filepath = os.path.join(data_dir, f"{subset}_val.txt")
+    if not os.path.exists(filepath):
+        raise FileNotFoundError(
+            f"T2I-CompBench {subset} data not found at {filepath}. "
+            f"Run: python data/download_t2i_compbench.py"
+        )
 
-        print(f"Loading T2I-CompBench {subset} from HuggingFace...")
-        ds = load_dataset("Zhicong/T2I-CompBench", split="validation")
-        prompts = [
-            (row["prompt"], [])
-            for row in ds
-            if row.get("category", "") == subset
-        ]
-        if prompts:
-            return prompts[:num_prompts]
-    except Exception as e:
-        print(f"Could not load from HuggingFace: {e}")
+    with open(filepath, "r") as f:
+        lines = [l.strip() for l in f.readlines() if l.strip()]
 
-    print(f"Using built-in {subset} prompts ({len(PROMPT_SETS.get(subset, []))} available)")
-    return PROMPT_SETS.get(subset, [])[:num_prompts]
+    prompts = []
+    for line in lines[:num_prompts]:
+        attrs = parse_compbench_prompt(line, subset)
+        prompts.append((line, attrs))
+
+    n_parsed = sum(1 for _, a in prompts if a)
+    print(
+        f"Loaded {len(prompts)} T2I-CompBench {subset} prompts "
+        f"({n_parsed}/{len(prompts)} with parsed attributes)"
+    )
+    return prompts
 
 
 def generate_images_for_prompts(
@@ -183,9 +139,11 @@ def generate_images_for_prompts(
         token_indices, prompt_anchor = filter_text(token_indices, prompt_anchor)
 
         if not token_indices:
-            token_indices = config.token_indices
+            token_indices = config.token_indices if config.token_indices else []
         if not prompt_anchor:
-            prompt_anchor = config.prompt_anchor
+            prompt_anchor = config.prompt_anchor if config.prompt_anchor else []
+
+        fallback_standard = not token_indices or not prompt_anchor
 
         nouns = [chunk.text for chunk in doc.noun_chunks]
         merged_prompt = " and ".join(
@@ -194,11 +152,14 @@ def generate_images_for_prompts(
         if not merged_prompt:
             merged_prompt = prompt
 
-        words = prompt.split()
         config.prompt_length = len(
             model.tokenizer(prompt)["input_ids"]
         ) - 2
         config.prompt_merged = merged_prompt
+
+        orig_run_standard = config.run_standard_sd
+        if fallback_standard:
+            config.run_standard_sd = True
 
         for seed in seeds:
             g = torch.Generator("cuda").manual_seed(seed)
@@ -209,8 +170,8 @@ def generate_images_for_prompts(
                     prompt=prompt,
                     model=model,
                     controller=controller,
-                    token_indices=token_indices,
-                    prompt_anchor=prompt_anchor,
+                    token_indices=token_indices if token_indices else [[0], [0]],
+                    prompt_anchor=prompt_anchor if prompt_anchor else [prompt],
                     seed=g,
                     config=config,
                 )
@@ -231,6 +192,9 @@ def generate_images_for_prompts(
             except Exception as e:
                 print(f"  Error generating prompt {prompt_idx}: {e}")
                 continue
+
+        if fallback_standard:
+            config.run_standard_sd = orig_run_standard
 
     return results
 
@@ -283,19 +247,27 @@ def evaluate_subset(
     print("\n--- Computing BLIP-VQA scores ---")
     blip_evaluator = BLIPVQAEvaluator()
 
-    image_paths = [r["image_path"] for r in generation_results]
-    prompts_data = []
+    eval_image_paths = []
+    eval_attr_data = []
     for r in generation_results:
         if r["attr_data"]:
-            prompts_data.extend(r["attr_data"])
+            for attr in r["attr_data"]:
+                eval_image_paths.append(r["image_path"])
+                eval_attr_data.append(attr)
         else:
-            prompts_data.append({
-                "object": "object", "attribute": subset, "prompt": r["prompt"]
-            })
+            attrs = parse_compbench_prompt(r["prompt"], subset)
+            if attrs:
+                for attr in attrs:
+                    eval_image_paths.append(r["image_path"])
+                    eval_attr_data.append(attr)
 
-    blip_results = blip_evaluator.evaluate_batch(
-        image_paths[:len(prompts_data)], prompts_data, subset
-    )
+    if not eval_attr_data:
+        print(f"  WARNING: No attribute pairs found for {subset}, skipping BLIP-VQA")
+        blip_results = {"mean_score": 0.0, "std_score": 0.0, "num_samples": 0}
+    else:
+        blip_results = blip_evaluator.evaluate_batch(
+            eval_image_paths, eval_attr_data, subset
+        )
 
     results = {
         "subset": subset,
@@ -309,8 +281,9 @@ def evaluate_subset(
         print("\n--- Computing ImageReward scores ---")
         try:
             ir_evaluator = ImageRewardEvaluator()
+            ir_image_paths = [r["image_path"] for r in generation_results]
             ir_prompts = [r["prompt"] for r in generation_results]
-            ir_results = ir_evaluator.evaluate_batch(image_paths, ir_prompts)
+            ir_results = ir_evaluator.evaluate_batch(ir_image_paths, ir_prompts)
             results["image_reward"] = ir_results
         except Exception as e:
             print(f"ImageReward evaluation failed: {e}")
@@ -331,8 +304,8 @@ def main():
     parser = argparse.ArgumentParser(description="T2I-CompBench Evaluation")
     parser.add_argument("--subset", type=str, default="all",
                        choices=["color", "shape", "texture", "all"])
-    parser.add_argument("--num_prompts", type=int, default=20,
-                       help="Number of prompts per subset (default 20 for quick test, use 300 for full eval)")
+    parser.add_argument("--num_prompts", type=int, default=300,
+                       help="Number of prompts per subset (default 300 = full T2I-CompBench)")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42])
     parser.add_argument("--data_dir", type=str, default=None,
                        help="Directory with T2I-CompBench prompt files")

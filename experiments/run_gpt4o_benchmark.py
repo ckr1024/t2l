@@ -60,6 +60,12 @@ def generate_gpt4o_benchmark_images(
         prompt_anchor = prompt_parser._split_prompt(doc)
         token_indices, prompt_anchor = filter_text(token_indices, prompt_anchor)
 
+        if not token_indices or not prompt_anchor:
+            token_indices = token_indices or []
+            prompt_anchor = prompt_anchor or []
+
+        fallback_standard = not token_indices or not prompt_anchor
+
         nouns = [chunk.root.text for chunk in doc.noun_chunks]
         merged_parts = []
         for chunk in doc.noun_chunks:
@@ -73,6 +79,10 @@ def generate_gpt4o_benchmark_images(
         config.prompt_length = len(model.tokenizer(prompt)["input_ids"]) - 2
         config.prompt_merged = merged_prompt
 
+        orig_run_standard = config.run_standard_sd
+        if fallback_standard:
+            config.run_standard_sd = True
+
         for seed in seeds:
             g = torch.Generator("cuda").manual_seed(seed)
             controller = AttentionStore()
@@ -82,8 +92,8 @@ def generate_gpt4o_benchmark_images(
                     prompt=prompt,
                     model=model,
                     controller=controller,
-                    token_indices=token_indices,
-                    prompt_anchor=prompt_anchor,
+                    token_indices=token_indices if token_indices else [[0], [0]],
+                    prompt_anchor=prompt_anchor if prompt_anchor else [prompt],
                     seed=g,
                     config=config,
                 )
@@ -103,6 +113,9 @@ def generate_gpt4o_benchmark_images(
             except Exception as e:
                 print(f"  Error: {e}")
                 continue
+
+        if fallback_standard:
+            config.run_standard_sd = orig_run_standard
 
     return results
 

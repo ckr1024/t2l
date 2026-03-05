@@ -248,20 +248,25 @@ def run_attention_visualization(
         )
 
         config_dir = os.path.join(output_dir, f"config_{config_name}")
+        os.makedirs(config_dir, exist_ok=True)
         image.save(os.path.join(config_dir, "generated_image.png"))
 
-        attention_maps = extract_attention_maps(controller, res=32)
+        try:
+            attention_maps = extract_attention_maps(controller, res=32)
 
-        token_images = visualize_token_attention(
-            attention_maps=attention_maps,
-            tokenizer=model.tokenizer,
-            prompt=prompt,
-            token_indices=visualize_indices,
-            output_dir=config_dir,
-            prefix=f"config{config_name}_",
-        )
+            token_images = visualize_token_attention(
+                attention_maps=attention_maps,
+                tokenizer=model.tokenizer,
+                prompt=prompt,
+                token_indices=visualize_indices,
+                output_dir=config_dir,
+                prefix=f"config{config_name}_",
+            )
 
-        all_attention_images[f"Config {config_name}"] = token_images
+            all_attention_images[f"Config {config_name}"] = token_images
+        except Exception as e:
+            print(f"  Skipping attention extraction for {config_name}: {e}")
+            continue
 
     grid_path = os.path.join(output_dir, "attention_comparison.png")
     create_attention_comparison_grid(all_attention_images, grid_path)

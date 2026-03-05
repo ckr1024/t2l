@@ -111,20 +111,24 @@ def evaluate_config(
     )
     gen_time = time.time() - start_time
 
-    image_paths = [r["image_path"] for r in gen_results]
-    prompts_data = []
+    from experiments.parse_compbench import parse_compbench_prompt
+
+    eval_images = []
+    eval_attrs = []
     for r in gen_results:
-        if r["attr_data"]:
+        if r.get("attr_data"):
             for attr in r["attr_data"]:
-                prompts_data.append(attr)
+                eval_images.append(r["image_path"])
+                eval_attrs.append(attr)
         else:
-            prompts_data.append({"object": "obj", "attribute": subset, "prompt": r["prompt"]})
+            attrs = parse_compbench_prompt(r["prompt"], subset)
+            for attr in attrs:
+                eval_images.append(r["image_path"])
+                eval_attrs.append(attr)
 
-    min_len = min(len(image_paths), len(prompts_data))
-    image_paths = image_paths[:min_len]
-    prompts_data = prompts_data[:min_len]
-
-    blip_results = blip_evaluator.evaluate_batch(image_paths, prompts_data, subset)
+    blip_results = blip_evaluator.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+        "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
+    }
 
     result = {
         "config": config_name,

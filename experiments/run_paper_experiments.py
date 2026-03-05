@@ -2,6 +2,9 @@
 Master Experiment Runner for Paper
 ===================================
 
+Uses the official T2I-CompBench dataset (300 prompts per subset) for
+all attribute binding evaluations.
+
 Generates ALL results needed for the paper in a single run:
 
   Table 1 (main):       SDXL vs ToMe (Eucl.) vs ToMe (Hyp.) on BLIP-VQA + ImageReward
@@ -14,11 +17,18 @@ Generates ALL results needed for the paper in a single run:
   Figure 2 (attention): Cross-attention map visualization
   Figure 3 (curv_plot): Curvature sensitivity curve
 
+Dataset:
+  T2I-CompBench (NeurIPS 2023) - auto-downloaded on first run.
+  Source: https://github.com/Karine-Huang/T2I-CompBench
+
 Usage:
-    # Full experiment (50 prompts x 3 seeds ≈ 12-24 hours on single GPU)
+    # Full experiment (300 prompts x 3 seeds ≈ 50-80 hours on single GPU)
     python -m experiments.run_paper_experiments
 
-    # Quick test (5 prompts x 1 seed ≈ 1-2 hours)
+    # Medium run (100 prompts x 2 seeds ≈ 20-30 hours)
+    python -m experiments.run_paper_experiments --num_prompts 100 --seeds 42 123
+
+    # Quick test (10 prompts x 1 seed ≈ 2-4 hours)
     python -m experiments.run_paper_experiments --quick
 
     # Selective experiments
@@ -60,7 +70,7 @@ def load_checkpoint(output_dir: str) -> Dict:
     if os.path.exists(ckpt_path):
         with open(ckpt_path, "r") as f:
             return json.load(f)
-    return {"completed": [], "results": {}}
+    return {"completed": [], "results": {}, "sub_completed": {}}
 
 
 def save_checkpoint(output_dir: str, checkpoint: Dict):
@@ -68,6 +78,30 @@ def save_checkpoint(output_dir: str, checkpoint: Dict):
     os.makedirs(output_dir, exist_ok=True)
     with open(ckpt_path, "w") as f:
         json.dump(checkpoint, f, indent=2, default=str)
+
+
+def _sub_key(exp_name: str, config_name: str, subset: str) -> str:
+    """Generate a unique key for config+subset level checkpointing."""
+    return f"{exp_name}::{config_name}::{subset}"
+
+
+def _is_sub_done(checkpoint: Dict, exp_name: str, config_name: str, subset: str) -> bool:
+    key = _sub_key(exp_name, config_name, subset)
+    return key in checkpoint.get("sub_completed", {})
+
+
+def _mark_sub_done(checkpoint: Dict, output_dir: str, exp_name: str,
+                   config_name: str, subset: str, result: Dict):
+    if "sub_completed" not in checkpoint:
+        checkpoint["sub_completed"] = {}
+    key = _sub_key(exp_name, config_name, subset)
+    checkpoint["sub_completed"][key] = result
+    save_checkpoint(output_dir, checkpoint)
+
+
+def _get_sub_result(checkpoint: Dict, exp_name: str, config_name: str, subset: str) -> Optional[Dict]:
+    key = _sub_key(exp_name, config_name, subset)
+    return checkpoint.get("sub_completed", {}).get(key)
 
 
 def log(msg: str):
@@ -79,15 +113,16 @@ def log(msg: str):
 # Experiment 1: Main Comparison (Table 1)
 # ============================================================
 
-def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir, use_ir=True):
-    """SDXL baseline vs ToMe (Euclidean) vs ToMe (Hyperbolic)."""
+def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir,
+                        data_dir=None, use_ir=True, checkpoint=None):
+    """SDXL baseline vs ToMe (Euclidean) vs ToMe (Hyperbolic) on T2I-CompBench."""
     from configs.experiment_config import ConfigA, ConfigOurs, HyperbolicConfigOurs
-    from experiments.run_t2i_compbench import generate_images_for_prompts
+    from experiments.run_t2i_compbench import generate_images_for_prompts, load_t2i_compbench_prompts
     from experiments.eval_metrics import BLIPVQAEvaluator, ImageRewardEvaluator
-    from experiments.prompts_extended import PROMPT_SETS_EXTENDED
 
     log("=" * 70)
     log("TABLE 1: Main Comparison (SDXL vs ToMe-Eucl. vs ToMe-Hyp.)")
+    log(f"  Dataset: T2I-CompBench ({num_prompts} prompts per subset)")
     log("=" * 70)
 
     configs = {
@@ -105,7 +140,13 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir, us
         results[config_name] = {}
 
         for subset in ["color", "shape", "texture"]:
-            prompts = PROMPT_SETS_EXTENDED[subset][:num_prompts]
+            cached = _get_sub_result(checkpoint, "main", config_name, subset) if checkpoint else None
+            if cached:
+                results[config_name][subset] = cached
+                log(f"  {config_name} | {subset} | SKIPPED (cached)")
+                continue
+
+            prompts = load_t2i_compbench_prompts(subset, num_prompts, data_dir)
             safe_name = config_name.replace(" ", "_").replace("(", "").replace(")", "").replace(".", "")
             img_dir = os.path.join(output_dir, "main", safe_name, subset, "images")
 
@@ -117,22 +158,16 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir, us
             )
             gen_time = time.time() - start
 
-            image_paths = [r["image_path"] for r in gen_results]
-            prompts_data = []
-            for r in gen_results:
-                if r["attr_data"]:
-                    for attr in r["attr_data"]:
-                        prompts_data.append(attr)
-                else:
-                    prompts_data.append({"object": "obj", "attribute": subset, "prompt": r["prompt"]})
-
-            min_len = min(len(image_paths), len(prompts_data))
-            blip_res = blip_eval.evaluate_batch(image_paths[:min_len], prompts_data[:min_len], subset)
+            eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
+            blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+                "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
+            }
 
             entry = {
                 "blip_vqa": blip_res["mean_score"],
                 "blip_std": blip_res["std_score"],
                 "num_images": len(gen_results),
+                "num_eval_pairs": len(eval_attrs),
                 "gen_time": gen_time,
             }
 
@@ -148,12 +183,14 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir, us
                     log(f"  ImageReward failed: {e}")
 
             results[config_name][subset] = entry
-            log(f"    BLIP-VQA: {blip_res['mean_score']:.4f} | Time: {gen_time:.1f}s")
+            if checkpoint:
+                _mark_sub_done(checkpoint, output_dir, "main", config_name, subset, entry)
+            log(f"    BLIP-VQA: {blip_res['mean_score']:.4f} ({len(eval_attrs)} pairs) | Time: {gen_time:.1f}s")
 
     _print_table(results, "Table 1: Main Comparison")
 
     from experiments.latex_utils import generate_main_comparison_table
-    latex = generate_main_comparison_table(results, os.path.join(output_dir, "latex", "table1_main.tex"))
+    generate_main_comparison_table(results, os.path.join(output_dir, "latex", "table1_main.tex"))
     log(f"  LaTeX table saved")
 
     return results
@@ -163,15 +200,16 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir, us
 # Experiment 2: Ablation Study (Table 2)
 # ============================================================
 
-def run_experiment_ablation(model, prompt_parser, seeds, num_prompts, output_dir):
-    """Standard ablation study (Euclidean only)."""
+def run_experiment_ablation(model, prompt_parser, seeds, num_prompts, output_dir,
+                            data_dir=None, checkpoint=None):
+    """Standard ablation study (Euclidean only) on T2I-CompBench."""
     from configs.experiment_config import ABLATION_CONFIGS
-    from experiments.run_t2i_compbench import generate_images_for_prompts
+    from experiments.run_t2i_compbench import generate_images_for_prompts, load_t2i_compbench_prompts
     from experiments.eval_metrics import BLIPVQAEvaluator
-    from experiments.prompts_extended import PROMPT_SETS_EXTENDED
 
     log("=" * 70)
     log("TABLE 2: Ablation Study (Configs A-F + Ours)")
+    log(f"  Dataset: T2I-CompBench ({num_prompts} prompts per subset)")
     log("=" * 70)
 
     config_order = ["A", "B", "C", "D", "E", "F", "Ours"]
@@ -185,7 +223,13 @@ def run_experiment_ablation(model, prompt_parser, seeds, num_prompts, output_dir
         results[config_name] = {}
 
         for subset in ["color", "shape", "texture"]:
-            prompts = PROMPT_SETS_EXTENDED[subset][:num_prompts]
+            cached = _get_sub_result(checkpoint, "ablation", config_name, subset) if checkpoint else None
+            if cached:
+                results[config_name][subset] = cached
+                log(f"  Config {config_name} | {subset} | SKIPPED (cached)")
+                continue
+
+            prompts = load_t2i_compbench_prompts(subset, num_prompts, data_dir)
             img_dir = os.path.join(output_dir, "ablation", f"config_{config_name}", subset, "images")
 
             log(f"  Config {config_name} | {subset}")
@@ -194,21 +238,17 @@ def run_experiment_ablation(model, prompt_parser, seeds, num_prompts, output_dir
                 prompts, config, model, prompt_parser, seeds, img_dir
             )
 
-            image_paths = [r["image_path"] for r in gen_results]
-            prompts_data = []
-            for r in gen_results:
-                if r["attr_data"]:
-                    for a in r["attr_data"]:
-                        prompts_data.append(a)
-                else:
-                    prompts_data.append({"object": "obj", "attribute": subset, "prompt": r["prompt"]})
-
-            min_len = min(len(image_paths), len(prompts_data))
-            blip_res = blip_eval.evaluate_batch(image_paths[:min_len], prompts_data[:min_len], subset)
-            results[config_name][subset] = {
+            eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
+            blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+                "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
+            }
+            entry = {
                 "blip_vqa": blip_res["mean_score"],
                 "blip_std": blip_res["std_score"],
             }
+            results[config_name][subset] = entry
+            if checkpoint:
+                _mark_sub_done(checkpoint, output_dir, "ablation", config_name, subset, entry)
             log(f"    BLIP-VQA: {blip_res['mean_score']:.4f}")
 
     _print_table(results, "Table 2: Ablation Study")
@@ -223,18 +263,19 @@ def run_experiment_ablation(model, prompt_parser, seeds, num_prompts, output_dir
 # Experiment 3: Hyperbolic Comparison (Table 3)
 # ============================================================
 
-def run_experiment_hyp_comp(model, prompt_parser, seeds, num_prompts, output_dir):
-    """Paired Euclidean vs Hyperbolic comparison for each config."""
+def run_experiment_hyp_comp(model, prompt_parser, seeds, num_prompts, output_dir,
+                            data_dir=None, checkpoint=None):
+    """Paired Euclidean vs Hyperbolic comparison on T2I-CompBench."""
     from configs.experiment_config import (
         ConfigB, ConfigC, ConfigF, ConfigOurs,
         HyperbolicConfigB, HyperbolicConfigC, HyperbolicConfigF, HyperbolicConfigOurs,
     )
-    from experiments.run_t2i_compbench import generate_images_for_prompts
+    from experiments.run_t2i_compbench import generate_images_for_prompts, load_t2i_compbench_prompts
     from experiments.eval_metrics import BLIPVQAEvaluator
-    from experiments.prompts_extended import PROMPT_SETS_EXTENDED
 
     log("=" * 70)
     log("TABLE 3: Euclidean vs Hyperbolic Paired Comparison")
+    log(f"  Dataset: T2I-CompBench ({num_prompts} prompts per subset)")
     log("=" * 70)
 
     config_pairs = [
@@ -255,7 +296,13 @@ def run_experiment_hyp_comp(model, prompt_parser, seeds, num_prompts, output_dir
             target_dict[name] = {}
 
             for subset in ["color", "shape", "texture"]:
-                prompts = PROMPT_SETS_EXTENDED[subset][:num_prompts]
+                cached = _get_sub_result(checkpoint, "hyp_comp", name, subset) if checkpoint else None
+                if cached:
+                    target_dict[name][subset] = cached
+                    log(f"  {name} | {subset} | SKIPPED (cached)")
+                    continue
+
+                prompts = load_t2i_compbench_prompts(subset, num_prompts, data_dir)
                 safe = name.replace("-", "_")
                 img_dir = os.path.join(output_dir, "hyp_comp", safe, subset, "images")
 
@@ -264,21 +311,17 @@ def run_experiment_hyp_comp(model, prompt_parser, seeds, num_prompts, output_dir
                     prompts, config, model, prompt_parser, seeds, img_dir
                 )
 
-                image_paths = [r["image_path"] for r in gen_results]
-                prompts_data = []
-                for r in gen_results:
-                    if r["attr_data"]:
-                        for a in r["attr_data"]:
-                            prompts_data.append(a)
-                    else:
-                        prompts_data.append({"object": "obj", "attribute": subset, "prompt": r["prompt"]})
-
-                min_len = min(len(image_paths), len(prompts_data))
-                blip_res = blip_eval.evaluate_batch(image_paths[:min_len], prompts_data[:min_len], subset)
-                target_dict[name][subset] = {
+                eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
+                blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+                    "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
+                }
+                entry = {
                     "blip_vqa": blip_res["mean_score"],
                     "blip_std": blip_res["std_score"],
                 }
+                target_dict[name][subset] = entry
+                if checkpoint:
+                    _mark_sub_done(checkpoint, output_dir, "hyp_comp", name, subset, entry)
                 log(f"    BLIP-VQA: {blip_res['mean_score']:.4f}")
 
     from experiments.latex_utils import generate_hyperbolic_comparison_table
@@ -294,17 +337,18 @@ def run_experiment_hyp_comp(model, prompt_parser, seeds, num_prompts, output_dir
 # Experiment 4: Curvature Sensitivity (Table 4 + Figure 3)
 # ============================================================
 
-def run_experiment_curvature(model, prompt_parser, seeds, num_prompts, output_dir, curvatures=None):
-    """Test different Poincare ball curvature values."""
+def run_experiment_curvature(model, prompt_parser, seeds, num_prompts, output_dir,
+                             curvatures=None, data_dir=None, checkpoint=None):
+    """Curvature sensitivity on T2I-CompBench."""
     from configs.experiment_config import HyperbolicConfigOurs
-    from experiments.run_t2i_compbench import generate_images_for_prompts
+    from experiments.run_t2i_compbench import generate_images_for_prompts, load_t2i_compbench_prompts
     from experiments.eval_metrics import BLIPVQAEvaluator
-    from experiments.prompts_extended import PROMPT_SETS_EXTENDED
 
     curvatures = curvatures or [0.1, 0.5, 1.0, 2.0, 5.0]
 
     log("=" * 70)
     log(f"TABLE 4: Curvature Sensitivity (c = {curvatures})")
+    log(f"  Dataset: T2I-CompBench ({num_prompts} prompts per subset)")
     log("=" * 70)
 
     blip_eval = BLIPVQAEvaluator()
@@ -318,7 +362,13 @@ def run_experiment_curvature(model, prompt_parser, seeds, num_prompts, output_di
         results[c_name] = {}
 
         for subset in ["color", "shape", "texture"]:
-            prompts = PROMPT_SETS_EXTENDED[subset][:num_prompts]
+            cached = _get_sub_result(checkpoint, "curvature", c_name, subset) if checkpoint else None
+            if cached:
+                results[c_name][subset] = cached
+                log(f"  c={c} | {subset} | SKIPPED (cached)")
+                continue
+
+            prompts = load_t2i_compbench_prompts(subset, num_prompts, data_dir)
             img_dir = os.path.join(output_dir, "curvature", f"c_{c}", subset, "images")
 
             log(f"  c={c} | {subset}")
@@ -326,21 +376,17 @@ def run_experiment_curvature(model, prompt_parser, seeds, num_prompts, output_di
                 prompts, config, model, prompt_parser, seeds, img_dir
             )
 
-            image_paths = [r["image_path"] for r in gen_results]
-            prompts_data = []
-            for r in gen_results:
-                if r["attr_data"]:
-                    for a in r["attr_data"]:
-                        prompts_data.append(a)
-                else:
-                    prompts_data.append({"object": "obj", "attribute": subset, "prompt": r["prompt"]})
-
-            min_len = min(len(image_paths), len(prompts_data))
-            blip_res = blip_eval.evaluate_batch(image_paths[:min_len], prompts_data[:min_len], subset)
-            results[c_name][subset] = {
+            eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
+            blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+                "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
+            }
+            entry = {
                 "blip_vqa": blip_res["mean_score"],
                 "blip_std": blip_res["std_score"],
             }
+            results[c_name][subset] = entry
+            if checkpoint:
+                _mark_sub_done(checkpoint, output_dir, "curvature", c_name, subset, entry)
             log(f"    BLIP-VQA: {blip_res['mean_score']:.4f}")
 
     _print_table(results, "Table 4: Curvature Sensitivity")
@@ -362,17 +408,16 @@ def run_experiment_curvature(model, prompt_parser, seeds, num_prompts, output_di
 # Experiment 5: Time Complexity (Table 5)
 # ============================================================
 
-def run_experiment_time(model, prompt_parser, seeds, output_dir):
+def run_experiment_time(model, prompt_parser, seeds, output_dir, data_dir=None):
     """Measure inference time overhead."""
     from configs.experiment_config import ConfigA, ConfigOurs, HyperbolicConfigOurs
-    from experiments.run_t2i_compbench import generate_images_for_prompts
-    from experiments.prompts_extended import COLOR_PROMPTS_EXTENDED
+    from experiments.run_t2i_compbench import generate_images_for_prompts, load_t2i_compbench_prompts
 
     log("=" * 70)
     log("TABLE 5: Time Complexity Comparison")
     log("=" * 70)
 
-    test_prompts = COLOR_PROMPTS_EXTENDED[:5]
+    test_prompts = load_t2i_compbench_prompts("color", 5, data_dir)
 
     configs = {
         "SDXL (baseline)": ConfigA(),
@@ -430,58 +475,55 @@ def run_experiment_time(model, prompt_parser, seeds, output_dir):
 # ============================================================
 
 def run_experiment_gpt4o(model, prompt_parser, seeds, num_prompts, output_dir):
-    """GPT-4o object binding evaluation."""
+    """GPT-4o object binding: generate images (scoring done separately via eval_gpt4o_offline.py)."""
     from configs.experiment_config import ConfigA, ConfigOurs, HyperbolicConfigOurs
-    from experiments.eval_gpt4o import GPT4oEvaluator, get_gpt4o_prompts
+    from experiments.eval_gpt4o import get_gpt4o_prompts
     from experiments.run_gpt4o_benchmark import generate_gpt4o_benchmark_images
+    from experiments.eval_metrics import save_evaluation_results
 
     log("=" * 70)
-    log("TABLE 6: GPT-4o Object Binding Benchmark")
+    log("TABLE 6: GPT-4o Object Binding - Image Generation")
     log("=" * 70)
-
-    api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        log("  WARNING: OPENAI_API_KEY not set. Will generate images only.")
-        log("  Set the key and re-run with --experiments gpt4o --resume")
+    log("  Images will be generated here. Score them later with:")
+    log(f"  python -m experiments.eval_gpt4o_offline --base_dir {output_dir}/gpt4o")
 
     prompts = get_gpt4o_prompts()[:num_prompts]
 
     configs = {
-        "SDXL (baseline)": ConfigA(),
-        "ToMe (Eucl.)": ConfigOurs(),
-        "ToMe (Hyp.)": HyperbolicConfigOurs(),
+        "SDXL_baseline": ConfigA(),
+        "ToMe_Eucl": ConfigOurs(),
+        "ToMe_Hyp": HyperbolicConfigOurs(),
     }
 
     results = {}
     for config_name, config in configs.items():
         config.seeds = seeds
         config.use_pose_loss = True
-        safe = config_name.replace(" ", "_").replace("(", "").replace(")", "").replace(".", "")
-        img_dir = os.path.join(output_dir, "gpt4o", safe, "images")
+        img_dir = os.path.join(output_dir, "gpt4o", config_name, "images")
 
-        log(f"  Generating: {config_name} ({len(prompts)} prompts)")
+        log(f"  Generating: {config_name} ({len(prompts)} prompts x {len(seeds)} seeds)")
         gen_results = generate_gpt4o_benchmark_images(
             prompts, config, model, prompt_parser, seeds, img_dir
         )
 
-        entry = {"num_images": len(gen_results)}
+        manifest = {
+            "results": gen_results,
+            "num_images": len(gen_results),
+            "prompts_used": len(prompts),
+            "seeds": seeds,
+        }
+        save_evaluation_results(
+            manifest,
+            os.path.join(output_dir, "gpt4o", config_name, "generation_results.json"),
+        )
+        log(f"    Generated {len(gen_results)} images")
 
-        if api_key:
-            log(f"  Scoring with GPT-4o: {config_name}")
-            evaluator = GPT4oEvaluator(api_key=api_key)
-            gpt4o_scores = evaluator.evaluate_batch(
-                [r["image_path"] for r in gen_results],
-                [r["prompt"] for r in gen_results],
-            )
-            entry["mean_score"] = gpt4o_scores["mean_score"]
-            entry["std_score"] = gpt4o_scores["std_score"]
-            log(f"    GPT-4o Score: {gpt4o_scores['mean_score']:.4f}")
+        results[config_name] = {"num_images": len(gen_results)}
 
-        results[config_name] = entry
-
-    if api_key:
-        from experiments.latex_utils import generate_gpt4o_table
-        generate_gpt4o_table(results, os.path.join(output_dir, "latex", "table6_gpt4o.tex"))
+    log(f"\n  All GPT-4o images saved to {output_dir}/gpt4o/")
+    log(f"  To score, run on a machine with API access:")
+    log(f"    export OPENAI_API_KEY='sk-...'")
+    log(f"    python -m experiments.eval_gpt4o_offline --base_dir {output_dir}/gpt4o")
 
     return results
 
@@ -538,6 +580,8 @@ def run_experiment_qualitative(model, prompt_parser, output_dir):
         prompt_anchor = prompt_parser._split_prompt(doc)
         token_indices, prompt_anchor = filter_text(token_indices, prompt_anchor)
 
+        fallback_standard = not token_indices or not prompt_anchor
+
         for config_name, config in configs.items():
             config.prompt = prompt
             nouns = [chunk.root.text for chunk in doc.noun_chunks]
@@ -545,13 +589,19 @@ def run_experiment_qualitative(model, prompt_parser, output_dir):
             config.prompt_merged = merged
             config.prompt_length = len(model.tokenizer(prompt)["input_ids"]) - 2
 
+            orig_std = config.run_standard_sd
+            if fallback_standard:
+                config.run_standard_sd = True
+
             g = torch.Generator("cuda").manual_seed(seed)
             controller = AttentionStore()
 
             try:
+                use_indices = token_indices if token_indices else [[0], [0]]
+                use_anchor = prompt_anchor if prompt_anchor else [prompt]
                 image = run_on_prompt(
                     prompt=prompt, model=model, controller=controller,
-                    token_indices=token_indices, prompt_anchor=prompt_anchor,
+                    token_indices=use_indices, prompt_anchor=use_anchor,
                     seed=g, config=config,
                 )
                 image.save(os.path.join(fig_dir, f"p{prompt_idx}_{config_name}.png"))
@@ -559,6 +609,9 @@ def run_experiment_qualitative(model, prompt_parser, output_dir):
             except Exception as e:
                 log(f"    Error ({config_name}): {e}")
                 row_images.append(Image.new("RGB", (1024, 1024), "gray"))
+            finally:
+                if fallback_standard:
+                    config.run_standard_sd = orig_std
 
         if row_images:
             w, h = row_images[0].size
@@ -592,7 +645,7 @@ def run_experiment_attention(model, prompt_parser, output_dir):
         safe_prompt = prompt[:30].replace(" ", "_")
         run_attention_visualization(
             prompt=prompt,
-            config_names=["A", "C", "Ours"],
+            config_names=["B", "C", "Ours"],
             model=model,
             prompt_parser=prompt_parser,
             seed=42,
@@ -606,6 +659,29 @@ def run_experiment_attention(model, prompt_parser, output_dir):
 # ============================================================
 # Utilities
 # ============================================================
+
+def _build_eval_pairs(gen_results: List[Dict], subset: str):
+    """Build (image_path, attr_dict) pairs for BLIP-VQA evaluation.
+
+    Each generated image is paired with each of its attribute annotations.
+    Falls back to on-the-fly parsing for images without pre-parsed attributes.
+    """
+    from experiments.parse_compbench import parse_compbench_prompt
+
+    eval_images = []
+    eval_attrs = []
+    for r in gen_results:
+        if r.get("attr_data"):
+            for attr in r["attr_data"]:
+                eval_images.append(r["image_path"])
+                eval_attrs.append(attr)
+        else:
+            attrs = parse_compbench_prompt(r["prompt"], subset)
+            for attr in attrs:
+                eval_images.append(r["image_path"])
+                eval_attrs.append(attr)
+    return eval_images, eval_attrs
+
 
 def _print_table(results: Dict, title: str):
     subsets = ["color", "shape", "texture"]
@@ -636,9 +712,8 @@ def _print_table(results: Dict, title: str):
     log("=" * 70)
 
 
-def estimate_time(num_prompts, num_seeds, experiments):
-    """Rough time estimate in hours."""
-    per_image_sec = 30
+def estimate_time(num_prompts, num_seeds, experiments, per_image_sec=15):
+    """Rough time estimate. Default 15s/image assumes H100/H200-class GPU."""
     n_images_per_exp = {
         "main": num_prompts * num_seeds * 3 * 3,
         "ablation": num_prompts * num_seeds * 7 * 3,
@@ -651,7 +726,8 @@ def estimate_time(num_prompts, num_seeds, experiments):
     }
     total = sum(n_images_per_exp.get(e, 0) for e in experiments)
     hours = total * per_image_sec / 3600
-    return total, hours
+    breakdown = {e: n_images_per_exp.get(e, 0) for e in experiments}
+    return total, hours, breakdown
 
 
 # ============================================================
@@ -686,9 +762,9 @@ Examples:
                        choices=EXPERIMENT_ORDER + ["all"],
                        help="Which experiments to run")
     parser.add_argument("--quick", action="store_true",
-                       help="Quick test: 5 prompts, 1 seed")
-    parser.add_argument("--num_prompts", type=int, default=50,
-                       help="Prompts per subset (default 50, use 5 for quick test)")
+                       help="Quick test: 10 prompts, 1 seed")
+    parser.add_argument("--num_prompts", type=int, default=300,
+                       help="Prompts per subset (default 300 = full T2I-CompBench)")
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 123, 456],
                        help="Random seeds for statistical significance")
     parser.add_argument("--curvatures", type=float, nargs="+",
@@ -697,29 +773,47 @@ Examples:
                        default="stabilityai/stable-diffusion-xl-base-1.0")
     parser.add_argument("--output_dir", type=str,
                        default="./paper_results")
+    parser.add_argument("--data_dir", type=str, default=None,
+                       help="T2I-CompBench data directory (auto-downloaded if not specified)")
     parser.add_argument("--no_image_reward", action="store_true")
     parser.add_argument("--resume", action="store_true",
-                       help="Resume from checkpoint, skip completed experiments")
+                       help="Resume from checkpoint, skip completed sub-tasks")
+    parser.add_argument("--estimate_only", action="store_true",
+                       help="Print time estimate and exit without running")
+    parser.add_argument("--per_image_sec", type=float, default=15,
+                       help="Seconds per image for time estimate (default 15 for H200)")
     args = parser.parse_args()
 
     if args.quick:
-        args.num_prompts = 5
+        args.num_prompts = 10
         args.seeds = [42]
         args.curvatures = [0.5, 1.0, 2.0]
 
     experiments = EXPERIMENT_ORDER if "all" in args.experiments else args.experiments
 
-    total_images, est_hours = estimate_time(args.num_prompts, len(args.seeds), experiments)
+    total_images, est_hours, breakdown = estimate_time(
+        args.num_prompts, len(args.seeds), experiments, args.per_image_sec
+    )
     log(f"Experiment Plan:")
     log(f"  Experiments: {experiments}")
     log(f"  Prompts/subset: {args.num_prompts}")
     log(f"  Seeds: {args.seeds}")
     log(f"  Estimated images: {total_images}")
-    log(f"  Estimated time: {est_hours:.1f} hours")
+    log(f"  Estimated time: {est_hours:.1f} hours (at {args.per_image_sec}s/image)")
     log(f"  Output: {args.output_dir}")
+    log(f"")
+    log(f"  Per-experiment breakdown:")
+    for exp_name in experiments:
+        n = breakdown.get(exp_name, 0)
+        h = n * args.per_image_sec / 3600
+        log(f"    {exp_name:15s}: {n:>7d} images  ~{h:>5.1f}h")
     log("")
 
-    checkpoint = load_checkpoint(args.output_dir) if args.resume else {"completed": [], "results": {}}
+    if args.estimate_only:
+        log("Exiting (--estimate_only mode)")
+        return
+
+    checkpoint = load_checkpoint(args.output_dir) if args.resume else {"completed": [], "results": {}, "sub_completed": {}}
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     log(f"Using device: {device}")
@@ -738,20 +832,25 @@ Examples:
     experiment_funcs = {
         "main": lambda: run_experiment_main(
             model, prompt_parser, args.seeds, args.num_prompts,
-            args.output_dir, use_ir=not args.no_image_reward,
+            args.output_dir, data_dir=args.data_dir,
+            use_ir=not args.no_image_reward, checkpoint=checkpoint,
         ),
         "ablation": lambda: run_experiment_ablation(
-            model, prompt_parser, args.seeds, args.num_prompts, args.output_dir,
+            model, prompt_parser, args.seeds, args.num_prompts,
+            args.output_dir, data_dir=args.data_dir, checkpoint=checkpoint,
         ),
         "hyp_comp": lambda: run_experiment_hyp_comp(
-            model, prompt_parser, args.seeds, args.num_prompts, args.output_dir,
+            model, prompt_parser, args.seeds, args.num_prompts,
+            args.output_dir, data_dir=args.data_dir, checkpoint=checkpoint,
         ),
         "curvature": lambda: run_experiment_curvature(
             model, prompt_parser, args.seeds, args.num_prompts,
             args.output_dir, args.curvatures,
+            data_dir=args.data_dir, checkpoint=checkpoint,
         ),
         "time": lambda: run_experiment_time(
             model, prompt_parser, args.seeds, args.output_dir,
+            data_dir=args.data_dir,
         ),
         "gpt4o": lambda: run_experiment_gpt4o(
             model, prompt_parser, args.seeds, min(args.num_prompts, 50), args.output_dir,
@@ -801,6 +900,7 @@ Examples:
     log(f"ALL EXPERIMENTS COMPLETED in {total_time/3600:.1f} hours")
     log(f"{'='*70}")
     log(f"Results: {args.output_dir}/all_results.json")
+    log(f"Dataset: T2I-CompBench ({args.num_prompts} prompts per subset)")
     log(f"LaTeX tables: {args.output_dir}/latex/")
     log(f"Figures: {args.output_dir}/figures/")
     log(f"")
