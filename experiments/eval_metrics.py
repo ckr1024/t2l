@@ -1,39 +1,67 @@
 """
 Evaluation metrics for T2I semantic binding experiments.
-Implements BLIP-VQA scoring and ImageReward scoring.
 
-BLIP-VQA: Measures attribute binding accuracy by asking VQA questions
-           about object-attribute associations in generated images.
+BLIP-VQA: Follows the T2I-CompBench evaluation protocol exactly:
+  - Extract noun phrases via spaCy (e.g., "a green bench")
+  - Ask BLIP-VQA: "{noun_phrase}?" → get P(yes)
+  - Per-image score = product of P(yes) across all noun phrases
+  - Final score = mean of per-image scores
+
 ImageReward: Measures human preference alignment between text and image.
 """
 
 import os
 import json
 import torch
+import torch.nn.functional as F
 import numpy as np
 from PIL import Image
-from typing import List, Dict, Tuple, Optional
-from pathlib import Path
+from typing import List, Dict, Optional
+
+
+def extract_noun_phrases(prompt: str) -> List[str]:
+    """
+    Extract noun phrases from a prompt using spaCy,
+    matching T2I-CompBench's noun_chunks extraction.
+    """
+    try:
+        import en_core_web_trf
+        nlp = en_core_web_trf.load()
+    except ImportError:
+        import spacy
+        try:
+            nlp = spacy.load("en_core_web_sm")
+        except OSError:
+            nlp = spacy.load("en_core_web_trf")
+
+    doc = nlp(prompt.rstrip("."))
+    skip = {"top", "the side", "the left", "the right"}
+    noun_phrases = []
+    for chunk in doc.noun_chunks:
+        if chunk.text.lower() not in skip:
+            noun_phrases.append(chunk.text)
+    return noun_phrases
 
 
 class BLIPVQAEvaluator:
     """
-    BLIP-VQA based evaluator for attribute binding assessment.
+    BLIP-VQA evaluator matching the T2I-CompBench protocol.
 
-    For each generated image, asks VQA questions about attribute-object bindings
-    (e.g., "What is the color of the cat?") and computes the probability that
-    the answer matches the expected attribute.
-
-    This follows the T2I-CompBench evaluation protocol.
+    For each image:
+      1. Extract noun phrases from the prompt
+      2. For each noun phrase, ask BLIP: "{noun_phrase}?" 
+      3. Get P(yes) from the model's output distribution
+      4. Image score = product of all P(yes) values
+    Final metric = mean of image scores across the dataset.
     """
 
     def __init__(self, device: str = "cuda"):
         self.device = device
         self.model = None
         self.processor = None
+        self._yes_token_id = None
 
     def load_model(self):
-        """Lazy-load BLIP VQA model to save memory."""
         if self.model is not None:
             return
 
@@ -44,132 +72,91 @@ class BLIPVQAEvaluator:
         self.processor = BlipProcessor.from_pretrained(model_name)
         self.model = BlipForQuestionAnswering.from_pretrained(model_name).to(self.device)
         self.model.eval()
+
+        self._yes_token_id = self.processor.tokenizer.encode(
+            "yes", add_special_tokens=False
+        )[0]
         print("BLIP-VQA model loaded.")
 
-    def ask_vqa(self, image: Image.Image, question: str) -> Dict[str, float]:
+    def compute_vqa_prob(self, image: Image.Image, question: str) -> float:
         """
-        Ask a VQA question and return answer probabilities.
-
-        Returns:
-            Dict mapping answer text to probability score.
+        Ask a yes/no question and return P(yes).
+        Matches T2I-CompBench's 'vqa_prob' inference mode.
         """
         self.load_model()
 
         inputs = self.processor(image, question, return_tensors="pt").to(self.device)
 
         with torch.no_grad():
-            outputs = self.model.generate(**inputs, max_new_tokens=10)
-            answer = self.processor.decode(outputs[0], skip_special_tokens=True)
-
-        return answer.strip().lower()
-
-    def compute_vqa_score(
-        self,
-        image: Image.Image,
-        attribute: str,
-        object_name: str,
-        attribute_type: str,
-    ) -> float:
-        """
-        Compute BLIP-VQA score for a single attribute-object pair.
-
-        Args:
-            image: Generated PIL image
-            attribute: Expected attribute (e.g., "red")
-            object_name: Object name (e.g., "cat")
-            attribute_type: Type of attribute ("color", "shape", or "texture")
-
-        Returns:
-            Score between 0 and 1
-        """
-        self.load_model()
-
-        question_templates = {
-            "color": f"What is the color of the {object_name}?",
-            "shape": f"What is the shape of the {object_name}?",
-            "texture": f"What is the texture of the {object_name}?",
-        }
-
-        question = question_templates.get(
-            attribute_type, f"What is the {attribute_type} of the {object_name}?"
-        )
-
-        inputs = self.processor(image, question, return_tensors="pt").to(self.device)
-
-        with torch.no_grad():
-            out = self.model.generate(
+            outputs = self.model.generate(
                 **inputs,
-                max_new_tokens=10,
                 output_scores=True,
                 return_dict_in_generate=True,
+                max_new_tokens=1,
             )
 
-        answer = self.processor.decode(out.sequences[0], skip_special_tokens=True).strip().lower()
-        attribute_lower = attribute.strip().lower()
+        logits = outputs.scores[0][0]
+        probs = F.softmax(logits, dim=-1)
+        p_yes = probs[self._yes_token_id].item()
+        return p_yes
 
-        if attribute_lower in answer or answer in attribute_lower:
-            return 1.0
+    def evaluate_image(
+        self, image: Image.Image, noun_phrases: List[str]
+    ) -> float:
+        """
+        Evaluate one image: product of P(yes) for each noun phrase question.
+        Matches T2I-CompBench's per-image scoring.
+        """
+        if not noun_phrases:
+            return 0.0
 
-        if out.scores:
-            first_token_logits = out.scores[0][0]
-            probs = torch.softmax(first_token_logits, dim=-1)
-
-            attr_tokens = self.processor.tokenizer.encode(
-                attribute_lower, add_special_tokens=False
-            )
-            if attr_tokens:
-                score = probs[attr_tokens[0]].item()
-                return max(score, 0.0)
-
-        return 0.0
+        score = 1.0
+        for np_text in noun_phrases:
+            question = f"{np_text}?"
+            p_yes = self.compute_vqa_prob(image, question)
+            score *= p_yes
+        return score
 
     def evaluate_batch(
         self,
         image_paths: List[str],
-        prompts_data: List[Dict],
-        attribute_type: str,
+        prompts: List[str],
+        attribute_type: str = "color",
     ) -> Dict[str, float]:
         """
-        Evaluate a batch of images for attribute binding.
+        Evaluate a batch of images following T2I-CompBench protocol.
 
         Args:
-            image_paths: List of paths to generated images
-            prompts_data: List of dicts with keys: "prompt", "attribute", "object"
-            attribute_type: "color", "shape", or "texture"
+            image_paths: Paths to generated images
+            prompts: Text prompts (one per image)
+            attribute_type: Not used in new protocol but kept for API compat
 
         Returns:
-            Dict with "mean_score" and individual scores
+            Dict with mean_score, std_score, num_samples
         """
         scores = []
-        for img_path, pdata in zip(image_paths, prompts_data):
+        for img_path, prompt in zip(image_paths, prompts):
             image = Image.open(img_path).convert("RGB")
-            score = self.compute_vqa_score(
-                image, pdata["attribute"], pdata["object"], attribute_type
-            )
+            noun_phrases = extract_noun_phrases(prompt)
+            score = self.evaluate_image(image, noun_phrases)
             scores.append(score)
 
         return {
-            "mean_score": np.mean(scores),
-            "std_score": np.std(scores),
+            "mean_score": float(np.mean(scores)) if scores else 0.0,
+            "std_score": float(np.std(scores)) if scores else 0.0,
             "individual_scores": scores,
             "num_samples": len(scores),
         }
 
 
 class ImageRewardEvaluator:
-    """
-    ImageReward evaluator for human preference scoring.
-
-    Uses the ImageReward model to compute human preference scores
-    that comprehensively measure image quality and prompt alignment.
-    """
+    """ImageReward evaluator for human preference scoring."""
 
     def __init__(self, device: str = "cuda"):
         self.device = device
         self.model = None
 
     def load_model(self):
-        """Lazy-load ImageReward model."""
         if self.model is not None:
             return
 
@@ -180,76 +167,28 @@ class ImageRewardEvaluator:
         print("ImageReward model loaded.")
 
     def compute_score(self, image_path: str, prompt: str) -> float:
-        """Compute ImageReward score for a single image-prompt pair."""
         self.load_model()
-        score = self.model.score(prompt, image_path)
-        return score
+        return self.model.score(prompt, image_path)
 
     def evaluate_batch(
         self,
         image_paths: List[str],
         prompts: List[str],
     ) -> Dict[str, float]:
-        """
-        Evaluate a batch of images with ImageReward.
-
-        Returns:
-            Dict with mean score and individual scores
-        """
         scores = []
         for img_path, prompt in zip(image_paths, prompts):
             score = self.compute_score(img_path, prompt)
             scores.append(score)
 
         return {
-            "mean_score": np.mean(scores),
-            "std_score": np.std(scores),
+            "mean_score": float(np.mean(scores)),
+            "std_score": float(np.std(scores)),
             "individual_scores": scores,
             "num_samples": len(scores),
         }
 
 
-def parse_attribute_prompt(prompt: str, attribute_type: str) -> List[Dict]:
-    """
-    Parse a T2I-CompBench prompt to extract object-attribute pairs.
-
-    For color prompts like "a red car and a blue bus":
-    Returns [{"object": "car", "attribute": "red"}, {"object": "bus", "attribute": "blue"}]
-    """
-    import spacy
-
-    try:
-        import en_core_web_trf
-        nlp = en_core_web_trf.load()
-    except ImportError:
-        nlp = spacy.load("en_core_web_sm")
-
-    doc = nlp(prompt)
-    pairs = []
-
-    modifiers = {"amod", "nmod", "compound", "npadvmod", "advmod", "acomp"}
-
-    for token in doc:
-        if token.pos_ not in ["NOUN", "PROPN"] or token.dep_ in modifiers:
-            continue
-
-        for child in token.children:
-            if child.dep_ in modifiers:
-                if attribute_type == "color" and child.pos_ == "ADJ":
-                    pairs.append({"object": token.text, "attribute": child.text})
-                elif attribute_type == "texture" and child.pos_ == "ADJ":
-                    pairs.append({"object": token.text, "attribute": child.text})
-                elif attribute_type == "shape" and child.pos_ == "ADJ":
-                    pairs.append({"object": token.text, "attribute": child.text})
-
-    if not pairs:
-        pairs.append({"object": "object", "attribute": "", "prompt": prompt})
-
-    return pairs
-
-
 def save_evaluation_results(results: Dict, output_path: str):
-    """Save evaluation results to JSON file."""
     os.makedirs(os.path.dirname(output_path), exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(results, f, indent=2, default=str)

@@ -244,30 +244,13 @@ def evaluate_subset(
     gen_time = time.time() - start_time
     print(f"Generation time: {gen_time:.1f}s ({gen_time/len(generation_results):.1f}s per image)")
 
-    print("\n--- Computing BLIP-VQA scores ---")
+    print("\n--- Computing BLIP-VQA scores (T2I-CompBench protocol) ---")
     blip_evaluator = BLIPVQAEvaluator()
 
-    eval_image_paths = []
-    eval_attr_data = []
-    for r in generation_results:
-        if r["attr_data"]:
-            for attr in r["attr_data"]:
-                eval_image_paths.append(r["image_path"])
-                eval_attr_data.append(attr)
-        else:
-            attrs = parse_compbench_prompt(r["prompt"], subset)
-            if attrs:
-                for attr in attrs:
-                    eval_image_paths.append(r["image_path"])
-                    eval_attr_data.append(attr)
+    eval_image_paths = [r["image_path"] for r in generation_results]
+    eval_prompts = [r["prompt"] for r in generation_results]
 
-    if not eval_attr_data:
-        print(f"  WARNING: No attribute pairs found for {subset}, skipping BLIP-VQA")
-        blip_results = {"mean_score": 0.0, "std_score": 0.0, "num_samples": 0}
-    else:
-        blip_results = blip_evaluator.evaluate_batch(
-            eval_image_paths, eval_attr_data, subset
-        )
+    blip_results = blip_evaluator.evaluate_batch(eval_image_paths, eval_prompts, subset)
 
     results = {
         "subset": subset,

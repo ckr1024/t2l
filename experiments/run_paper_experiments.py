@@ -158,8 +158,8 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir,
             )
             gen_time = time.time() - start
 
-            eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
-            blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+            eval_paths, eval_prompts = _build_eval_lists(gen_results)
+            blip_res = blip_eval.evaluate_batch(eval_paths, eval_prompts, subset) if eval_paths else {
                 "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
             }
 
@@ -167,16 +167,12 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir,
                 "blip_vqa": blip_res["mean_score"],
                 "blip_std": blip_res["std_score"],
                 "num_images": len(gen_results),
-                "num_eval_pairs": len(eval_attrs),
                 "gen_time": gen_time,
             }
 
             if ir_eval:
                 try:
-                    ir_res = ir_eval.evaluate_batch(
-                        [r["image_path"] for r in gen_results],
-                        [r["prompt"] for r in gen_results],
-                    )
+                    ir_res = ir_eval.evaluate_batch(eval_paths, eval_prompts)
                     entry["image_reward"] = ir_res["mean_score"]
                     entry["image_reward_std"] = ir_res["std_score"]
                 except Exception as e:
@@ -185,7 +181,7 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir,
             results[config_name][subset] = entry
             if checkpoint:
                 _mark_sub_done(checkpoint, output_dir, "main", config_name, subset, entry)
-            log(f"    BLIP-VQA: {blip_res['mean_score']:.4f} ({len(eval_attrs)} pairs) | Time: {gen_time:.1f}s")
+            log(f"    BLIP-VQA: {blip_res['mean_score']:.4f} ({len(eval_paths)} images) | Time: {gen_time:.1f}s")
 
     _print_table(results, "Table 1: Main Comparison")
 
@@ -238,8 +234,8 @@ def run_experiment_ablation(model, prompt_parser, seeds, num_prompts, output_dir
                 prompts, config, model, prompt_parser, seeds, img_dir
             )
 
-            eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
-            blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+            eval_paths, eval_prompts = _build_eval_lists(gen_results)
+            blip_res = blip_eval.evaluate_batch(eval_paths, eval_prompts, subset) if eval_paths else {
                 "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
             }
             entry = {
@@ -311,8 +307,8 @@ def run_experiment_hyp_comp(model, prompt_parser, seeds, num_prompts, output_dir
                     prompts, config, model, prompt_parser, seeds, img_dir
                 )
 
-                eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
-                blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+                eval_paths, eval_prompts = _build_eval_lists(gen_results)
+                blip_res = blip_eval.evaluate_batch(eval_paths, eval_prompts, subset) if eval_paths else {
                     "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
                 }
                 entry = {
@@ -376,8 +372,8 @@ def run_experiment_curvature(model, prompt_parser, seeds, num_prompts, output_di
                 prompts, config, model, prompt_parser, seeds, img_dir
             )
 
-            eval_images, eval_attrs = _build_eval_pairs(gen_results, subset)
-            blip_res = blip_eval.evaluate_batch(eval_images, eval_attrs, subset) if eval_attrs else {
+            eval_paths, eval_prompts = _build_eval_lists(gen_results)
+            blip_res = blip_eval.evaluate_batch(eval_paths, eval_prompts, subset) if eval_paths else {
                 "mean_score": 0.0, "std_score": 0.0, "num_samples": 0
             }
             entry = {
@@ -660,27 +656,15 @@ def run_experiment_attention(model, prompt_parser, output_dir):
 # Utilities
 # ============================================================
 
-def _build_eval_pairs(gen_results: List[Dict], subset: str):
-    """Build (image_path, attr_dict) pairs for BLIP-VQA evaluation.
+def _build_eval_lists(gen_results: List[Dict]):
+    """Extract (image_paths, prompts) from generation results for BLIP-VQA.
 
-    Each generated image is paired with each of its attribute annotations.
-    Falls back to on-the-fly parsing for images without pre-parsed attributes.
+    The new T2I-CompBench protocol evaluates per-image using noun phrases
+    extracted from the prompt, not attribute-object pairs.
     """
-    from experiments.parse_compbench import parse_compbench_prompt
-
-    eval_images = []
-    eval_attrs = []
-    for r in gen_results:
-        if r.get("attr_data"):
-            for attr in r["attr_data"]:
-                eval_images.append(r["image_path"])
-                eval_attrs.append(attr)
-        else:
-            attrs = parse_compbench_prompt(r["prompt"], subset)
-            for attr in attrs:
-                eval_images.append(r["image_path"])
-                eval_attrs.append(attr)
-    return eval_images, eval_attrs
+    image_paths = [r["image_path"] for r in gen_results]
+    prompts = [r["prompt"] for r in gen_results]
+    return image_paths, prompts
 
 
 def _print_table(results: Dict, title: str):

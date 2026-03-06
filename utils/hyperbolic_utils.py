@@ -1,119 +1,91 @@
 """
-Hyperbolic geometry operations in the Poincaré ball model.
+Hyperbolic geometry operations using the Lorentz (hyperboloid) model.
 
-Provides core operations for the hyperbolic improvement to ToMe:
-  1. Token merging via Möbius addition (replacing Euclidean summation)
-  2. Geodesic distance for semantic binding loss (replacing L2/MSE)
-  3. Hyperbolic Fréchet variance for entropy loss (replacing Shannon entropy)
+The Lorentz model represents hyperbolic space on the upper sheet of a hyperboloid
+in Minkowski space R^{n+1} with the Minkowski inner product:
+    <x, y>_L = -x_0 y_0 + x_1 y_1 + ... + x_n y_n
 
-All operations work in the Poincaré ball model B_c^n = {x ∈ R^n : c||x||² < 1}
-with curvature parameter c > 0.
+Hyperboloid: H^n_c = {x in R^{n+1} : <x,x>_L = -1/c, x_0 > 0}
+Origin: o = (1/sqrt(c), 0, ..., 0)
 
-Mathematical reference:
-  - Nickel & Kiela, "Poincaré Embeddings for Learning Hierarchical Representations", NeurIPS 2017
-  - Ganea et al., "Hyperbolic Neural Networks", NeurIPS 2018
+Advantages over the Poincare ball model:
+  - No boundary constraints (no need for project_to_ball clamping)
+  - Gradients are stable everywhere (acosh is well-conditioned vs atanh explosion)
+  - Distance computation uses inner product (simpler, no Mobius subtraction)
+
+Mathematical references:
+  - Nickel & Kiela, "Learning Continuous Hierarchies in the Lorentz Model", ICML 2018
+  - Law et al., "Lorentzian Distance Learning for Hyperbolic Representations", ICML 2019
 """
 
+import math
 import torch
 from typing import List
 
 
 # ============================================================
-# Core Poincaré Ball Operations
+# Lorentz Model Core Operations
 # ============================================================
 
-def artanh(x: torch.Tensor) -> torch.Tensor:
-    """Numerically stable arctanh using log1p."""
-    x = x.clamp(-1 + 1e-7, 1 - 1e-7)
-    return 0.5 * (torch.log1p(x) - torch.log1p(-x))
+def lorentz_inner(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    """Minkowski inner product: <x,y>_L = -x0*y0 + sum_{i>0} xi*yi."""
+    time = -x[..., 0:1] * y[..., 0:1]
+    space = (x[..., 1:] * y[..., 1:]).sum(dim=-1, keepdim=True)
+    return time + space
 
 
-def project_to_ball(x: torch.Tensor, c: float = 1.0, eps: float = 1e-5) -> torch.Tensor:
-    """Project points to strictly inside the Poincaré ball."""
-    max_norm = (1.0 - eps) / (c ** 0.5)
-    norm = x.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    cond = norm > max_norm
-    x_proj = x / norm * max_norm
-    return torch.where(cond, x_proj, x)
-
-
-def exp_map_zero(v: torch.Tensor, c: float = 1.0) -> torch.Tensor:
+def exp_map_lorentz(v: torch.Tensor, c: float = 1.0) -> torch.Tensor:
     """
-    Exponential map at the origin of the Poincaré ball.
-    Maps tangent vectors (Euclidean) → Poincaré ball.
+    Exponential map at the origin of the Lorentz hyperboloid.
+    Maps Euclidean vectors v in R^d to points on H^d in R^{d+1}.
 
-    exp_0(v) = tanh(√c ||v||) · v / (√c ||v||)
+    exp_o(v) = cosh(sqrt(c) ||v||) * o + sinh(sqrt(c) ||v||) / (sqrt(c) ||v||) * v_hat
+    where o = (1/sqrt(c), 0,...,0) and v_hat = (0, v_1,...,v_d).
     """
-    sqrt_c = c ** 0.5
-    v_norm = v.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    result = torch.tanh(sqrt_c * v_norm) * v / (sqrt_c * v_norm)
-    return project_to_ball(result, c)
+    sqrt_c = math.sqrt(c)
+    v_norm = v.norm(dim=-1, keepdim=True).clamp(min=1e-7)
+
+    t = torch.cosh(sqrt_c * v_norm) / sqrt_c
+    coeff = torch.sinh(sqrt_c * v_norm) / (sqrt_c * v_norm)
+    s = coeff * v
+
+    return torch.cat([t, s], dim=-1)
 
 
-def log_map_zero(x: torch.Tensor, c: float = 1.0) -> torch.Tensor:
+def log_map_lorentz(h: torch.Tensor, c: float = 1.0) -> torch.Tensor:
     """
-    Logarithmic map at the origin of the Poincaré ball.
-    Maps Poincaré ball → tangent vectors (Euclidean).
+    Logarithmic map at the origin. Maps hyperboloid point h to R^d.
 
-    log_0(x) = arctanh(√c ||x||) · x / (√c ||x||)
+    For h = (h_0, s) on the hyperboloid:
+        d = d(o, h) = (1/sqrt(c)) * acosh(sqrt(c) * h_0)
+        log_o(h) = d * s / ||s||
     """
-    sqrt_c = c ** 0.5
-    x = project_to_ball(x, c)
-    x_norm = x.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    return artanh(sqrt_c * x_norm) * x / (sqrt_c * x_norm)
+    sqrt_c = math.sqrt(c)
+    t = h[..., 0:1]
+    s = h[..., 1:]
+
+    d = torch.acosh((sqrt_c * t).clamp(min=1.0 + 1e-7)) / sqrt_c
+    s_norm = s.norm(dim=-1, keepdim=True).clamp(min=1e-7)
+
+    return (d / s_norm) * s
 
 
-def mobius_add(x: torch.Tensor, y: torch.Tensor, c: float = 1.0) -> torch.Tensor:
+def lorentz_distance(x: torch.Tensor, y: torch.Tensor, c: float = 1.0) -> torch.Tensor:
     """
-    Möbius addition in the Poincaré ball.
+    Geodesic distance on the Lorentz hyperboloid.
 
-    x ⊕_c y = ((1 + 2c⟨x,y⟩ + c||y||²)x + (1 - c||x||²)y)
-              / (1 + 2c⟨x,y⟩ + c²||x||²||y||²)
-    """
-    x = project_to_ball(x, c)
-    y = project_to_ball(y, c)
+    d_c(x, y) = (1/sqrt(c)) * acosh(-c * <x, y>_L)
 
-    x_sq = (x * x).sum(dim=-1, keepdim=True)
-    y_sq = (y * y).sum(dim=-1, keepdim=True)
-    xy = (x * y).sum(dim=-1, keepdim=True)
-
-    num = (1 + 2 * c * xy + c * y_sq) * x + (1 - c * x_sq) * y
-    den = 1 + 2 * c * xy + c ** 2 * x_sq * y_sq
-
-    return project_to_ball(num / den.clamp(min=1e-8), c)
-
-
-def mobius_scalar_mult(r: float, x: torch.Tensor, c: float = 1.0) -> torch.Tensor:
-    """
-    Möbius scalar multiplication.
-
-    r ⊗_c x = (1/√c) tanh(r · arctanh(√c ||x||)) · x / ||x||
-    """
-    sqrt_c = c ** 0.5
-    x = project_to_ball(x, c)
-    x_norm = x.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-
-    scaled_norm = torch.tanh(r * artanh(sqrt_c * x_norm)) / sqrt_c
-    return project_to_ball(scaled_norm * x / x_norm, c)
-
-
-def hyperbolic_distance(x: torch.Tensor, y: torch.Tensor, c: float = 1.0) -> torch.Tensor:
-    """
-    Geodesic distance in the Poincaré ball.
-
-    d_c(x, y) = (2/√c) · arctanh(√c || (-x) ⊕_c y ||)
-
+    Numerically stable: acosh is well-conditioned for all inputs >= 1.
     Returns: (..., 1) tensor of distances.
     """
-    sqrt_c = c ** 0.5
-    neg_x = -x
-    add_result = mobius_add(neg_x, y, c)
-    add_norm = add_result.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-    return (2.0 / sqrt_c) * artanh(sqrt_c * add_norm)
+    sqrt_c = math.sqrt(c)
+    inner = lorentz_inner(x, y)
+    return torch.acosh((-c * inner).clamp(min=1.0 + 1e-7)) / sqrt_c
 
 
 # ============================================================
-# Hyperbolic Token Merging (replacing Euclidean addition)
+# Hyperbolic Token Merging (Lorentz distance-based weighting)
 # ============================================================
 
 def token_merge_hyperbolic(
@@ -122,16 +94,18 @@ def token_merge_hyperbolic(
     c: float = 1.0,
 ) -> torch.Tensor:
     """
-    Token merging via Möbius addition in the Poincaré ball,
-    with norm preservation to match the pre-trained model's expectations.
+    Token merging with Lorentz distance-based weighting.
 
-    Strategy:
-      1. Compute Euclidean composite (for target norm)
-      2. Compute hyperbolic composite (for direction via Möbius ops)
-      3. Rescale hyperbolic direction to match Euclidean norm
+    Instead of directly aggregating on the hyperboloid (numerically fragile
+    for 2048-dim CLIP embeddings), we:
+      1. Project tokens to 2D features (norm, cosine-to-noun)
+      2. Map to the 3D Lorentz hyperboloid
+      3. Compute geodesic distances (numerically stable via acosh)
+      4. Convert inverse distances to attention weights
+      5. Aggregate in Euclidean space using these weights
 
-    This preserves the hierarchical structure from hyperbolic geometry
-    while keeping embeddings in the distribution the model expects.
+    This captures the hierarchical noun-attribute structure from hyperbolic
+    geometry while keeping embeddings compatible with the pre-trained model.
     """
     for idxs in idx_merge:
         noun_idx = idxs[0][0]
@@ -139,35 +113,34 @@ def token_merge_hyperbolic(
         noun_tokens = prompt_embeds[idxs[0]]  # (N, dim)
         attr_tokens = prompt_embeds[idxs[1]]  # (M, dim)
 
-        # Euclidean reference for norm matching
-        eucl_composite = 1.1 * noun_tokens.sum(dim=0) + 1.2 * attr_tokens.sum(dim=0)
-        eucl_norm = eucl_composite.norm().clamp(min=1e-8)
-
-        # Hyperbolic operations for direction
+        N = noun_tokens.shape[0]
+        M = attr_tokens.shape[0]
         all_tokens = torch.cat([noun_tokens, attr_tokens], dim=0)
-        scale = all_tokens.norm(dim=-1).max().clamp(min=1.0).item()
 
-        noun_scaled = noun_tokens / scale
-        attr_scaled = attr_tokens / scale
+        # 2D projection: [token norm, cosine similarity to noun centroid]
+        norms = all_tokens.norm(dim=-1, keepdim=True)
+        noun_centroid = noun_tokens.mean(dim=0, keepdim=True)
+        noun_dir = noun_centroid / noun_centroid.norm(dim=-1, keepdim=True).clamp(min=1e-8)
+        all_dir = all_tokens / norms.clamp(min=1e-8)
+        cos_sim = (all_dir * noun_dir).sum(dim=-1, keepdim=True)
 
-        noun_hyp = exp_map_zero(noun_scaled, c)
-        attr_hyp = exp_map_zero(attr_scaled, c)
+        features_2d = torch.cat([norms, cos_sim], dim=-1)
+        feat_scale = features_2d.norm(dim=-1).max().clamp(min=1.0).item()
+        features_scaled = features_2d / feat_scale * 0.5
 
-        result = mobius_scalar_mult(1.1, noun_hyp[0:1], c)
-        for i in range(1, noun_hyp.shape[0]):
-            next_tok = mobius_scalar_mult(1.1, noun_hyp[i : i + 1], c)
-            result = mobius_add(result, next_tok, c)
+        # Map to 3D Lorentz hyperboloid and compute distances
+        features_hyp = exp_map_lorentz(features_scaled, c)
+        noun_center_hyp = features_hyp[:N].mean(dim=0, keepdim=True)
+        dists = lorentz_distance(
+            features_hyp, noun_center_hyp.expand_as(features_hyp), c
+        ).squeeze(-1)
 
-        for i in range(attr_hyp.shape[0]):
-            next_tok = mobius_scalar_mult(1.2, attr_hyp[i : i + 1], c)
-            result = mobius_add(result, next_tok, c)
+        inv_dists = 1.0 / (dists + 0.1)
+        noun_weights = torch.softmax(inv_dists[:N] * 3.0, dim=0) * N * 1.1
+        attr_weights = torch.softmax(inv_dists[N:] * 3.0, dim=0) * M * 1.2
 
-        hyp_direction = log_map_zero(result, c) * scale  # back to Euclidean scale
-        hyp_direction = hyp_direction.squeeze(0)
-        hyp_norm = hyp_direction.norm().clamp(min=1e-8)
-
-        # Rescale to match Euclidean norm but keep hyperbolic direction
-        composite = hyp_direction * (eucl_norm / hyp_norm)
+        composite = (noun_weights.unsqueeze(-1) * noun_tokens).sum(dim=0) + \
+                     (attr_weights.unsqueeze(-1) * attr_tokens).sum(dim=0)
 
         prompt_embeds[noun_idx] = composite
         if len(idxs[0]) > 1:
@@ -178,20 +151,21 @@ def token_merge_hyperbolic(
 
 
 # ============================================================
-# Hyperbolic Semantic Binding Loss (replacing MSE)
+# Hyperbolic Semantic Binding Loss (Lorentz geodesic distance)
 # ============================================================
 
 def hyperbolic_spatial_loss(
     pred: torch.Tensor, target: torch.Tensor, c: float = 1.0
 ) -> torch.Tensor:
     """
-    Geodesic distance loss replacing MSE for semantic binding,
-    auto-calibrated to match MSE magnitude.
+    Geodesic distance loss on the Lorentz hyperboloid, replacing MSE
+    for semantic binding. Auto-calibrated to match MSE magnitude.
 
-    Computes both MSE (for scale reference) and geodesic distance²,
-    then scales the geodesic loss to match MSE. This preserves the
-    correct gradient step size while using hyperbolic geometry
-    for the gradient *direction*.
+    Workflow:
+      1. Flatten noise predictions to per-pixel 4D vectors
+      2. Map to 5D Lorentz hyperboloid
+      3. Compute geodesic distance (acosh-based, numerically stable)
+      4. Scale to match MSE magnitude (detached ratio preserves grad direction)
     """
     B, C, H, W = pred.shape
 
@@ -204,45 +178,41 @@ def hyperbolic_spatial_loss(
     pred_s = pred_flat / scale
     target_s = target_flat / scale
 
-    pred_hyp = exp_map_zero(pred_s, c)
-    target_hyp = exp_map_zero(target_s, c)
+    pred_hyp = exp_map_lorentz(pred_s, c)
+    target_hyp = exp_map_lorentz(target_s, c)
 
-    dist = hyperbolic_distance(pred_hyp, target_hyp, c)
+    dist = lorentz_distance(pred_hyp, target_hyp, c)
     raw_loss = dist.pow(2).mean()
 
-    # Auto-calibrate: scale geodesic² to match MSE magnitude
-    # .detach() on ratio so it doesn't affect gradient direction
     scale_factor = (mse_ref / raw_loss.clamp(min=1e-10)).detach()
     return raw_loss * scale_factor
 
 
 # ============================================================
-# Hyperbolic Entropy Loss (replacing Shannon entropy)
+# Hyperbolic Entropy Loss (Lorentz Frechet variance)
 # ============================================================
 
 def compute_hyperbolic_entropy_loss(
     cross_map: torch.Tensor, c: float = 1.0
 ) -> torch.Tensor:
     """
-    Hyperbolic Fréchet variance as a replacement for Shannon entropy,
-    auto-calibrated to match the Euclidean entropy loss magnitude.
+    Hyperbolic Frechet variance on the Lorentz hyperboloid as a replacement
+    for Shannon entropy, auto-calibrated to match Euclidean entropy magnitude.
 
-    Computes both Shannon entropy (for scale reference) and Fréchet
-    variance in the 2D Poincaré ball, then scales to match. This
-    ensures the attention concentration has the same optimization
-    strength while using hyperbolic geometry for gradient structure.
+    Workflow:
+      1. Build 2D position grid for attention map pixels
+      2. Map to 3D Lorentz hyperboloid
+      3. Compute weighted Frechet mean in tangent space
+      4. Compute weighted geodesic variance around the mean
+      5. Scale to match Euclidean entropy magnitude
 
     Args:
         cross_map: (H, W, K) normalized attention maps (each sums to 1)
-        c: Poincaré ball curvature
-
-    Returns:
-        Scalar loss (calibrated to match Euclidean entropy magnitude)
+        c: Lorentz curvature
     """
     H, W, K = cross_map.shape
     device = cross_map.device
 
-    # Euclidean entropy reference (same formula as in _entropy_loss)
     eucl_entropy = -2.0 * (cross_map * torch.log(cross_map + 1e-5)).sum()
 
     grid_y = torch.linspace(-0.45, 0.45, H, device=device)
@@ -250,28 +220,27 @@ def compute_hyperbolic_entropy_loss(
     gy, gx = torch.meshgrid(grid_y, grid_x, indexing="ij")
     positions = torch.stack([gx, gy], dim=-1).reshape(-1, 2)
 
-    pos_hyp = exp_map_zero(positions, c)
-    pos_tangent = log_map_zero(pos_hyp, c)
+    pos_hyp = exp_map_lorentz(positions, c)
 
     raw_loss = torch.tensor(0.0, device=device)
     for k in range(K):
         weights = cross_map[:, :, k].reshape(-1)
 
-        mean_tangent = (weights.unsqueeze(-1) * pos_tangent).sum(
-            dim=0, keepdim=True
-        )
-        mean_hyp = exp_map_zero(mean_tangent, c)
+        pos_tangent = log_map_lorentz(pos_hyp, c)
+        mean_tangent = (weights.unsqueeze(-1) * pos_tangent).sum(dim=0, keepdim=True)
+        mean_hyp = exp_map_lorentz(mean_tangent, c)
 
-        dists = hyperbolic_distance(
-            pos_hyp, mean_hyp.expand_as(pos_hyp), c
-        )
+        dists = lorentz_distance(pos_hyp, mean_hyp.expand_as(pos_hyp), c)
         variance = (weights * dists.squeeze(-1).pow(2)).sum()
         raw_loss = raw_loss + variance
 
-    # Auto-calibrate to Euclidean entropy magnitude
     scale_factor = (eucl_entropy.abs() / raw_loss.clamp(min=1e-10)).detach()
     return raw_loss * scale_factor
 
+
+# ============================================================
+# Hyperbolic Position Loss
+# ============================================================
 
 def compute_hyperbolic_pose_loss(
     pair_pos: torch.Tensor,
@@ -280,18 +249,13 @@ def compute_hyperbolic_pose_loss(
     grid_size: float = 32.0,
     c: float = 1.0,
 ) -> torch.Tensor:
-    """
-    Position loss using geodesic distance instead of L2.
-
-    Maps centroid positions and target positions to the Poincaré ball,
-    then computes squared geodesic distance.
-    """
+    """Position loss using Lorentz geodesic distance instead of L2."""
     scale = grid_size
-    p0_hyp = exp_map_zero((pair_pos[0] / scale).unsqueeze(0), c)
-    p1_hyp = exp_map_zero((pair_pos[1] / scale).unsqueeze(0), c)
-    t0_hyp = exp_map_zero((pos1 / scale).unsqueeze(0), c)
-    t1_hyp = exp_map_zero((pos2 / scale).unsqueeze(0), c)
+    p0_hyp = exp_map_lorentz((pair_pos[0] / scale).unsqueeze(0), c)
+    p1_hyp = exp_map_lorentz((pair_pos[1] / scale).unsqueeze(0), c)
+    t0_hyp = exp_map_lorentz((pos1 / scale).unsqueeze(0), c)
+    t1_hyp = exp_map_lorentz((pos2 / scale).unsqueeze(0), c)
 
-    loss = 0.2 * hyperbolic_distance(p0_hyp, t0_hyp, c).pow(2).mean()
-    loss = loss + 0.2 * hyperbolic_distance(p1_hyp, t1_hyp, c).pow(2).mean()
+    loss = 0.2 * lorentz_distance(p0_hyp, t0_hyp, c).pow(2).mean()
+    loss = loss + 0.2 * lorentz_distance(p1_hyp, t1_hyp, c).pow(2).mean()
     return loss
