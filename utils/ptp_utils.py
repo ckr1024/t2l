@@ -298,7 +298,8 @@ def aggregate_attention(attention_store: AttentionStore,
         for item in attention_maps[f"{location}_{'cross' if is_cross else 'self'}"]:
             if item.shape[1] == num_pixels:
                 cross_maps = item.reshape(1, -1, res, res, item.shape[-1])[select]
-                out.append(cross_maps)
+                # Average over heads within this layer to handle varying head counts (SDXL)
+                out.append(cross_maps.mean(0, keepdim=True))
     out = torch.cat(out, dim=0)
     out = out.sum(0) / out.shape[0]
     return out

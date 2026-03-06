@@ -122,18 +122,16 @@ def token_merge_hyperbolic(
     c: float = 1.0,
 ) -> torch.Tensor:
     """
-    Token merging via Möbius addition in the Poincaré ball.
+    Token merging via Möbius addition in the Poincaré ball,
+    with norm preservation to match the pre-trained model's expectations.
 
-    Instead of ĉ_k = α·n_k + 1.2·Σa_k (Euclidean addition),
-    we perform:
-      1. Euclidean → Poincaré ball (exp map)
-      2. Möbius scalar multiplication for weighting
-      3. Möbius addition for aggregation
-      4. Poincaré ball → Euclidean (log map)
+    Strategy:
+      1. Compute Euclidean composite (for target norm)
+      2. Compute hyperbolic composite (for direction via Möbius ops)
+      3. Rescale hyperbolic direction to match Euclidean norm
 
-    This respects the hyperbolic geometry of the embedding space,
-    capturing hierarchical entity-attribute relationships better
-    than flat Euclidean addition.
+    This preserves the hierarchical structure from hyperbolic geometry
+    while keeping embeddings in the distribution the model expects.
     """
     for idxs in idx_merge:
         noun_idx = idxs[0][0]
@@ -141,6 +139,11 @@ def token_merge_hyperbolic(
         noun_tokens = prompt_embeds[idxs[0]]  # (N, dim)
         attr_tokens = prompt_embeds[idxs[1]]  # (M, dim)
 
+        # Euclidean reference for norm matching
+        eucl_composite = 1.1 * noun_tokens.sum(dim=0) + 1.2 * attr_tokens.sum(dim=0)
+        eucl_norm = eucl_composite.norm().clamp(min=1e-8)
+
+        # Hyperbolic operations for direction
         all_tokens = torch.cat([noun_tokens, attr_tokens], dim=0)
         scale = all_tokens.norm(dim=-1).max().clamp(min=1.0).item()
 
@@ -159,9 +162,14 @@ def token_merge_hyperbolic(
             next_tok = mobius_scalar_mult(1.2, attr_hyp[i : i + 1], c)
             result = mobius_add(result, next_tok, c)
 
-        composite = log_map_zero(result, c) * scale
+        hyp_direction = log_map_zero(result, c) * scale  # back to Euclidean scale
+        hyp_direction = hyp_direction.squeeze(0)
+        hyp_norm = hyp_direction.norm().clamp(min=1e-8)
 
-        prompt_embeds[noun_idx] = composite.squeeze(0)
+        # Rescale to match Euclidean norm but keep hyperbolic direction
+        composite = hyp_direction * (eucl_norm / hyp_norm)
+
+        prompt_embeds[noun_idx] = composite
         if len(idxs[0]) > 1:
             prompt_embeds[idxs[0][1:]] = 0
         prompt_embeds[idxs[1]] = 0
@@ -177,19 +185,20 @@ def hyperbolic_spatial_loss(
     pred: torch.Tensor, target: torch.Tensor, c: float = 1.0
 ) -> torch.Tensor:
     """
-    Geodesic distance loss replacing MSE for semantic binding.
+    Geodesic distance loss replacing MSE for semantic binding,
+    auto-calibrated to match MSE magnitude.
 
-    For noise predictions of shape (B, C, H, W), computes per-pixel
-    geodesic distance in a C-dimensional Poincaré ball, then averages.
-    This replaces ||ε_θ(z_t, ĉ_k, t) - ε_θ(z_t, C, t)||² with
-    d_H(ε_θ(z_t, ĉ_k, t), ε_θ(z_t, C, t))².
-
-    Using per-pixel C-dim (C=4 for latent diffusion) Poincaré ball
-    keeps the dimension low for numerical stability.
+    Computes both MSE (for scale reference) and geodesic distance²,
+    then scales the geodesic loss to match MSE. This preserves the
+    correct gradient step size while using hyperbolic geometry
+    for the gradient *direction*.
     """
     B, C, H, W = pred.shape
-    pred_flat = pred.permute(0, 2, 3, 1).reshape(-1, C)     # (B*H*W, C)
-    target_flat = target.permute(0, 2, 3, 1).reshape(-1, C)  # (B*H*W, C)
+
+    mse_ref = torch.nn.functional.mse_loss(pred, target)
+
+    pred_flat = pred.permute(0, 2, 3, 1).reshape(-1, C)
+    target_flat = target.permute(0, 2, 3, 1).reshape(-1, C)
 
     scale = torch.cat([pred_flat, target_flat]).norm(dim=-1).max().clamp(min=1.0)
     pred_s = pred_flat / scale
@@ -198,8 +207,13 @@ def hyperbolic_spatial_loss(
     pred_hyp = exp_map_zero(pred_s, c)
     target_hyp = exp_map_zero(target_s, c)
 
-    dist = hyperbolic_distance(pred_hyp, target_hyp, c)  # (B*H*W, 1)
-    return dist.pow(2).mean()
+    dist = hyperbolic_distance(pred_hyp, target_hyp, c)
+    raw_loss = dist.pow(2).mean()
+
+    # Auto-calibrate: scale geodesic² to match MSE magnitude
+    # .detach() on ratio so it doesn't affect gradient direction
+    scale_factor = (mse_ref / raw_loss.clamp(min=1e-10)).detach()
+    return raw_loss * scale_factor
 
 
 # ============================================================
@@ -210,54 +224,53 @@ def compute_hyperbolic_entropy_loss(
     cross_map: torch.Tensor, c: float = 1.0
 ) -> torch.Tensor:
     """
-    Hyperbolic Fréchet variance as a replacement for Shannon entropy.
+    Hyperbolic Fréchet variance as a replacement for Shannon entropy,
+    auto-calibrated to match the Euclidean entropy loss magnitude.
 
-    For each token's attention map (H×W probability distribution over
-    spatial positions), computes the weighted Fréchet variance in the
-    2D Poincaré ball:
-      1. Map 2D grid positions to Poincaré ball
-      2. Compute weighted Fréchet mean (tangent space approximation)
-      3. Compute weighted sum of squared geodesic distances to mean
-
-    Minimizing this variance concentrates the attention in hyperbolic
-    space, analogous to minimizing Shannon entropy in Euclidean space,
-    but respecting the curved geometry.
+    Computes both Shannon entropy (for scale reference) and Fréchet
+    variance in the 2D Poincaré ball, then scales to match. This
+    ensures the attention concentration has the same optimization
+    strength while using hyperbolic geometry for gradient structure.
 
     Args:
         cross_map: (H, W, K) normalized attention maps (each sums to 1)
         c: Poincaré ball curvature
 
     Returns:
-        Scalar loss (sum of Fréchet variances over tokens)
+        Scalar loss (calibrated to match Euclidean entropy magnitude)
     """
     H, W, K = cross_map.shape
     device = cross_map.device
 
+    # Euclidean entropy reference (same formula as in _entropy_loss)
+    eucl_entropy = -2.0 * (cross_map * torch.log(cross_map + 1e-5)).sum()
+
     grid_y = torch.linspace(-0.45, 0.45, H, device=device)
     grid_x = torch.linspace(-0.45, 0.45, W, device=device)
     gy, gx = torch.meshgrid(grid_y, grid_x, indexing="ij")
-    positions = torch.stack([gx, gy], dim=-1).reshape(-1, 2)  # (H*W, 2)
+    positions = torch.stack([gx, gy], dim=-1).reshape(-1, 2)
 
-    pos_hyp = exp_map_zero(positions, c)  # (H*W, 2)
-    pos_tangent = log_map_zero(pos_hyp, c)  # (H*W, 2) for mean computation
+    pos_hyp = exp_map_zero(positions, c)
+    pos_tangent = log_map_zero(pos_hyp, c)
 
-    loss = 0.0
+    raw_loss = torch.tensor(0.0, device=device)
     for k in range(K):
-        weights = cross_map[:, :, k].reshape(-1)  # (H*W,)
+        weights = cross_map[:, :, k].reshape(-1)
 
         mean_tangent = (weights.unsqueeze(-1) * pos_tangent).sum(
             dim=0, keepdim=True
-        )  # (1, 2)
-        mean_hyp = exp_map_zero(mean_tangent, c)  # (1, 2)
+        )
+        mean_hyp = exp_map_zero(mean_tangent, c)
 
         dists = hyperbolic_distance(
             pos_hyp, mean_hyp.expand_as(pos_hyp), c
-        )  # (H*W, 1)
+        )
         variance = (weights * dists.squeeze(-1).pow(2)).sum()
+        raw_loss = raw_loss + variance
 
-        loss = loss + variance
-
-    return loss
+    # Auto-calibrate to Euclidean entropy magnitude
+    scale_factor = (eucl_entropy.abs() / raw_loss.clamp(min=1e-10)).detach()
+    return raw_loss * scale_factor
 
 
 def compute_hyperbolic_pose_loss(
