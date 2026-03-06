@@ -1,0 +1,69 @@
+{
+  "results": [
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0000_seed42.png",
+      "prompt": "a cat wearing sunglasses and a dog wearing hat",
+      "seed": 42,
+      "prompt_idx": 0
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0001_seed42.png",
+      "prompt": "a man wearing hat and a woman wearing necklace",
+      "seed": 42,
+      "prompt_idx": 1
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0002_seed42.png",
+      "prompt": "a dog with hat and a cat with scarf",
+      "seed": 42,
+      "prompt_idx": 2
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0003_seed42.png",
+      "prompt": "a boy with glasses and a girl with earrings",
+      "seed": 42,
+      "prompt_idx": 3
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0004_seed42.png",
+      "prompt": "a boy with hat and a corgi with sunglasses",
+      "seed": 42,
+      "prompt_idx": 4
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0005_seed42.png",
+      "prompt": "a cat with scarf and a dog with tie",
+      "seed": 42,
+      "prompt_idx": 5
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0006_seed42.png",
+      "prompt": "a fox with sunglasses and a deer with crown",
+      "seed": 42,
+      "prompt_idx": 6
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0007_seed42.png",
+      "prompt": "a bear with hat and a man with glasses",
+      "seed": 42,
+      "prompt_idx": 7
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0008_seed42.png",
+      "prompt": "a man with hat and a girl with necklace",
+      "seed": 42,
+      "prompt_idx": 8
+    },
+    {
+      "image_path": "paper_results_quick_v2/gpt4o/ToMe_Hyp/images/prompt0009_seed42.png",
+      "prompt": "a tiger with glasses and a dog with hat",
+      "seed": 42,
+      "prompt_idx": 9
+    }
+  ],
+  "num_images": 10,
+  "prompts_used": 10,
+  "seeds": [
+    42
+  ]
+}
