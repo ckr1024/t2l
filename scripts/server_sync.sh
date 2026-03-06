@@ -69,4 +69,3 @@ echo ""
 echo "--- Ready to commit. Run: ---"
 echo '  git commit -m "Sync experiment results"'
 echo '  git push'
-
