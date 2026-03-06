@@ -1,2 +1,53 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
 .venv/
 venv/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Model cache
+*.safetensors
+*.bin
+*.ckpt
+*.pt
+*.pth
+
+# ============================================================
+# Experiment results: ONLY sync metrics, tables, and key figures
+# ============================================================
+
+# Ignore ALL generated images in experiment result directories
+paper_results*/*/images/
+paper_results*/**/images/
+paper_results*/time/*/
+
+# Ignore mask images (generated during pipeline)
+mask_*
+
+# Keep these (not ignored):
+#   paper_results*/all_results.json
+#   paper_results*/checkpoint.json
+#   paper_results*/latex/*.tex
+#   paper_results*/figures/curvature_plot.pdf
+#   paper_results*/figures/curvature_plot.py
+#   paper_results*/figures/qualitative/*.png  (few, for paper)
+#   paper_results*/figures/attention/*.png    (few, for paper)
+
+# Ignore any large binary outputs
+*.mp4
+*.avi
+*.zip
+*.tar.gz
