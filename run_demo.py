@@ -42,10 +42,19 @@ def load_model(config, device):
         variant="fp16",
         safety_checker=None,
     ).to(device)
-    # stable.enable_xformers_memory_efficient_attention()
     stable.unet.requires_grad_(False)
     stable.vae.requires_grad_(False)
-    # stable.enable_model_cpu_offload()
+
+    # Initialize hyperbolic token merger if enabled
+    use_hyp = getattr(config, "use_hyperbolic", False)
+    hyp_c = getattr(config, "hyperbolic_curvature", 1.0)
+    if use_hyp:
+        from utils.hyperbolic_utils import TokenMergerWithAttnHyperspace
+        stable._hyp_merger = TokenMergerWithAttnHyperspace(
+            embed_dim=2048, num_heads=8, max_length=128, c=hyp_c
+        ).to(device).half()
+    else:
+        stable._hyp_merger = None
 
     prompt_parser = PromptParser(stable_diffusion_version)
 

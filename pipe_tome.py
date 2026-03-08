@@ -24,6 +24,7 @@ from utils.ptp_utils import AttentionStore, aggregate_attention, register_self_t
 from utils.hyperbolic_utils import (
     token_merge_hyperbolic, hyperbolic_spatial_loss,
     compute_hyperbolic_entropy_loss, compute_hyperbolic_pose_loss,
+    contrastive_loss_hyperspace, TokenMergerWithAttnHyperspace,
 )
 from torchvision import transforms as T
 
@@ -368,11 +369,23 @@ class tomePipeline(StableDiffusionXLPipeline):
         stoken = stoken - grad_cond
         return stoken
 
-    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor, iter_num=3):
+    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor,
+                  iter_num=3, other_anchor_preds=None):
         """
-        latents: 128 128 4
-        stoken: dim
-        prompt_anchor: 77 dim
+        Optimize composite token via semantic binding loss.
+
+        When use_hyperbolic is enabled and other_anchor_preds is provided,
+        uses contrastive loss in hyperbolic space (InfoNCE with geodesic
+        distances). Otherwise uses standard MSE.
+
+        Args:
+            latents: Latent tensor for this entity
+            t: Current timestep
+            stoken: Composite token embedding to optimize
+            prompt_anchor: Prompt embedding for the target phrase
+            iter_num: Number of optimization iterations
+            other_anchor_preds: Pre-computed noise predictions from other
+                entities (used as negatives in contrastive loss)
         """
         stoken.requires_grad_(True)
 
@@ -399,9 +412,12 @@ class tomePipeline(StableDiffusionXLPipeline):
                 added_cond_kwargs=self.added_cond_kwargs2,
             ).sample
 
-            if getattr(self, '_use_hyperbolic', False):
+            if getattr(self, '_use_hyperbolic', False) and other_anchor_preds is not None:
                 _c = getattr(self, '_hyperbolic_curvature', 1.0)
-                loss = hyperbolic_spatial_loss(noise_pred_anchor, noise_pred_token, _c)
+                loss = contrastive_loss_hyperspace(
+                    noise_pred_token, noise_pred_anchor,
+                    other_anchor_preds, temp=0.07, c=_c,
+                )
             else:
                 loss = torch.nn.functional.mse_loss(noise_pred_anchor, noise_pred_token)
 
@@ -550,6 +566,16 @@ class tomePipeline(StableDiffusionXLPipeline):
         self._use_hyperbolic = use_hyperbolic
         self._hyperbolic_curvature = hyperbolic_curvature
 
+        # Lazy-initialize hyperbolic token merger on first use
+        if use_hyperbolic and not hasattr(self, '_hyp_merger') or (
+            use_hyperbolic and self._hyp_merger is None
+        ):
+            self._hyp_merger = TokenMergerWithAttnHyperspace(
+                embed_dim=2048, num_heads=8, max_length=128, c=hyperbolic_curvature
+            ).to(device=self.device, dtype=torch.float16)
+        if not hasattr(self, '_hyp_merger'):
+            self._hyp_merger = None
+
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
             batch_size = 1
@@ -637,7 +663,11 @@ class tomePipeline(StableDiffusionXLPipeline):
         # -----------------------------------
         # token merge
         if not run_standard_sd and token_refinement_steps and use_token_merge:
-            if use_hyperbolic:
+            if use_hyperbolic and hasattr(self, '_hyp_merger') and self._hyp_merger is not None:
+                prompt_embeds[0] = self._hyp_merger(
+                    prompt_embeds[0], indices_to_alter
+                )
+            elif use_hyperbolic:
                 prompt_embeds[0] = token_merge_hyperbolic(
                     prompt_embeds[0], indices_to_alter, hyperbolic_curvature
                 )
@@ -810,18 +840,39 @@ class tomePipeline(StableDiffusionXLPipeline):
                                 prompt_length + 1 :]
                         # semantic binding loss for token refinement
                         if i < token_control:
+                            # Pre-compute anchor noise predictions for contrastive negatives
+                            _anchor_preds = None
+                            if use_hyperbolic and len(panchors) > 1:
+                                _anchor_preds = []
+                                with torch.no_grad():
+                                    for _pa in panchors:
+                                        _pred = self.unet(
+                                            latent_anchor[0].clone().detach().unsqueeze(0),
+                                            t,
+                                            encoder_hidden_states=_pa,
+                                            timestep_cond=self.timestep_cond,
+                                            cross_attention_kwargs=self.cross_attention_kwargs,
+                                            added_cond_kwargs=self.added_cond_kwargs2,
+                                        ).sample
+                                        _anchor_preds.append(_pred)
+
                             for idx, panchor in enumerate(panchors):
                                 stoken = (
                                     prompt_embeds2[1, indices_to_alter[idx][0][0]]
                                     .detach()
                                     .clone()
                                 )
+                                other_preds = None
+                                if _anchor_preds is not None:
+                                    other_preds = [p for j, p in enumerate(_anchor_preds) if j != idx]
+
                                 stoken, latent_anchor[idx] = self.opt_token(
                                     latent_anchor[idx],
                                     t,
                                     stoken,
                                     panchor,
                                     token_refinement_steps,
+                                    other_anchor_preds=other_preds,
                                 )
                                 prompt_embeds2[1, indices_to_alter[idx][0][0]] = stoken
                         # entropy loss for attention refinement
