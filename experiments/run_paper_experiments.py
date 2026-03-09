@@ -172,7 +172,8 @@ def run_experiment_main(model, prompt_parser, seeds, num_prompts, output_dir,
 
             if ir_eval:
                 try:
-                    ir_res = ir_eval.evaluate_batch(eval_paths, eval_prompts)
+                    ir_prompts = [r["prompt"] for r in gen_results]
+                    ir_res = ir_eval.evaluate_batch(eval_paths, ir_prompts)
                     entry["image_reward"] = ir_res["mean_score"]
                     entry["image_reward_std"] = ir_res["std_score"]
                 except Exception as e:
@@ -657,11 +658,7 @@ def run_experiment_attention(model, prompt_parser, output_dir):
 # ============================================================
 
 def _build_eval_lists(gen_results: List[Dict]):
-    """Extract (image_paths, prompts) from generation results for BLIP-VQA.
-
-    The new T2I-CompBench protocol evaluates per-image using noun phrases
-    extracted from the prompt, not attribute-object pairs.
-    """
+    """Extract (image_paths, prompts) from generation results for BLIP-VQA."""
     image_paths = [r["image_path"] for r in gen_results]
     prompts = [r["prompt"] for r in gen_results]
     return image_paths, prompts
