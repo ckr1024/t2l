@@ -78,9 +78,21 @@ def run_single_config(
     blip_evaluator = BLIPVQAEvaluator()
 
     image_paths = [r["image_path"] for r in generation_results]
-    eval_prompts = [r["prompt"] for r in generation_results]
+    prompts_data = []
+    for r in generation_results:
+        if r["attr_data"]:
+            prompts_data.extend(r["attr_data"])
+        else:
+            prompts_data.append({
+                "object": "object", "attribute": subset, "prompt": r["prompt"]
+            })
 
-    blip_results = blip_evaluator.evaluate_batch(image_paths, eval_prompts, subset)
+    if len(prompts_data) > len(image_paths):
+        prompts_data = prompts_data[:len(image_paths)]
+    elif len(prompts_data) < len(image_paths):
+        image_paths = image_paths[:len(prompts_data)]
+
+    blip_results = blip_evaluator.evaluate_batch(image_paths, prompts_data, subset)
 
     results = {
         "config_name": config_name,

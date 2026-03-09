@@ -2,13 +2,10 @@
 Evaluation metrics for T2I semantic binding experiments.
 
 BLIP-VQA: Follows the T2I-CompBench evaluation protocol exactly:
-  - Extract noun phrases via spaCy
-  - Ask BLIP-VQA: "{noun_phrase}?" with vqa_prob inference
-  - Get P(yes) using binary softmax over only "yes"/"no" tokens
+  - Extract noun phrases via spaCy (e.g., "a green bench")
+  - Ask BLIP-VQA: "{noun_phrase}?" → get P(yes)
   - Per-image score = product of P(yes) across all noun phrases
   - Final score = mean of per-image scores
-
-Reference: https://github.com/Karine-Huang/T2I-CompBench/blob/main/BLIPvqa_eval/
 
 ImageReward: Measures human preference alignment between text and image.
 """
@@ -50,9 +47,12 @@ class BLIPVQAEvaluator:
     """
     BLIP-VQA evaluator matching the T2I-CompBench protocol.
 
-    Uses vqa_prob inference: for each noun phrase question, compute P(yes)
-    via binary softmax over "yes" and "no" token logits only.
-    Per-image score = product of P(yes); final score = mean.
+    For each image:
+      1. Extract noun phrases from the prompt
+      2. For each noun phrase, ask BLIP: "{noun_phrase}?" 
+      3. Get P(yes) from the model's output distribution
+      4. Image score = product of all P(yes) values
+    Final metric = mean of image scores across the dataset.
     """
 
     def __init__(self, device: str = "cuda"):
@@ -60,7 +60,6 @@ class BLIPVQAEvaluator:
         self.model = None
         self.processor = None
         self._yes_token_id = None
-        self._no_token_id = None
 
     def load_model(self):
         if self.model is not None:
@@ -77,17 +76,12 @@ class BLIPVQAEvaluator:
         self._yes_token_id = self.processor.tokenizer.encode(
             "yes", add_special_tokens=False
         )[0]
-        self._no_token_id = self.processor.tokenizer.encode(
-            "no", add_special_tokens=False
-        )[0]
-        print(f"BLIP-VQA model loaded. yes_id={self._yes_token_id}, no_id={self._no_token_id}")
+        print("BLIP-VQA model loaded.")
 
     def compute_vqa_prob(self, image: Image.Image, question: str) -> float:
         """
-        Ask a yes/no question and return P(yes) via binary softmax.
-
-        Matches T2I-CompBench's vqa_prob inference: softmax is computed
-        over only the "yes" and "no" logits, not the full vocabulary.
+        Ask a yes/no question and return P(yes).
+        Matches T2I-CompBench's 'vqa_prob' inference mode.
         """
         self.load_model()
 
@@ -102,11 +96,8 @@ class BLIPVQAEvaluator:
             )
 
         logits = outputs.scores[0][0]
-        yes_logit = logits[self._yes_token_id]
-        no_logit = logits[self._no_token_id]
-        binary_logits = torch.stack([yes_logit, no_logit])
-        probs = F.softmax(binary_logits, dim=-1)
-        p_yes = probs[0].item()
+        probs = F.softmax(logits, dim=-1)
+        p_yes = probs[self._yes_token_id].item()
         return p_yes
 
     def evaluate_image(
@@ -117,7 +108,7 @@ class BLIPVQAEvaluator:
         Matches T2I-CompBench's per-image scoring.
         """
         if not noun_phrases:
-            return 1.0
+            return 0.0
 
         score = 1.0
         for np_text in noun_phrases:
@@ -138,7 +129,7 @@ class BLIPVQAEvaluator:
         Args:
             image_paths: Paths to generated images
             prompts: Text prompts (one per image)
-            attribute_type: Not used but kept for API compat
+            attribute_type: Not used in new protocol but kept for API compat
 
         Returns:
             Dict with mean_score, std_score, num_samples
