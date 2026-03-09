@@ -22,8 +22,6 @@ from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipeline
 
 from utils.ptp_utils import AttentionStore, aggregate_attention, register_self_time
 from utils.hyperbolic_utils import (
-    token_merge_hyperbolic, hyperbolic_spatial_loss,
-    compute_hyperbolic_entropy_loss, compute_hyperbolic_pose_loss,
     contrastive_loss_hyperspace, TokenMergerWithAttnHyperspace,
 )
 from torchvision import transforms as T
@@ -240,11 +238,7 @@ class tomePipeline(StableDiffusionXLPipeline):
         )
         cross_map = cross_map / cross_map.sum(dim=(0, 1), keepdim=True)
 
-        if getattr(self, '_use_hyperbolic', False):
-            _c = getattr(self, '_hyperbolic_curvature', 1.0)
-            loss = loss + compute_hyperbolic_entropy_loss(cross_map, _c)
-        else:
-            loss = loss - 2 * (cross_map * torch.log(cross_map + 1e-5)).sum()
+        loss = loss - 2 * (cross_map * torch.log(cross_map + 1e-5)).sum()
         if pose_loss:
             idx = 0
             for subject_idx, subject_idx2 in [indices]:
@@ -269,12 +263,8 @@ class tomePipeline(StableDiffusionXLPipeline):
 
                 pos2 = torch.tensor([25.0, 16]).to("cuda")
 
-                if getattr(self, '_use_hyperbolic', False):
-                    _c = getattr(self, '_hyperbolic_curvature', 1.0)
-                    loss = loss + compute_hyperbolic_pose_loss(pair_pos, pos1, pos2, 32.0, _c)
-                else:
-                    loss = loss + (0.2 * (pair_pos[0] - pos1) ** 2).mean()
-                    loss = loss + (0.2 * (pair_pos[1] - pos2) ** 2).mean()
+                loss = loss + (0.2 * (pair_pos[0] - pos1) ** 2).mean()
+                loss = loss + (0.2 * (pair_pos[1] - pos2) ** 2).mean()
 
                 T.ToPILImage()(sub_map.reshape(1, 32, 32)).save("mask_left.png")
                 T.ToPILImage()(sub_map2.reshape(1, 32, 32)).save("mask_right.png")
@@ -413,10 +403,9 @@ class tomePipeline(StableDiffusionXLPipeline):
             ).sample
 
             if getattr(self, '_use_hyperbolic', False) and other_anchor_preds is not None:
-                _c = getattr(self, '_hyperbolic_curvature', 1.0)
                 loss = contrastive_loss_hyperspace(
                     noise_pred_token, noise_pred_anchor,
-                    other_anchor_preds, temp=0.07, c=_c,
+                    other_anchor_preds, temp=0.07,
                 )
             else:
                 loss = torch.nn.functional.mse_loss(noise_pred_anchor, noise_pred_token)
@@ -666,10 +655,6 @@ class tomePipeline(StableDiffusionXLPipeline):
             if use_hyperbolic and hasattr(self, '_hyp_merger') and self._hyp_merger is not None:
                 prompt_embeds[0] = self._hyp_merger(
                     prompt_embeds[0], indices_to_alter
-                )
-            elif use_hyperbolic:
-                prompt_embeds[0] = token_merge_hyperbolic(
-                    prompt_embeds[0], indices_to_alter, hyperbolic_curvature
                 )
             else:
                 prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)

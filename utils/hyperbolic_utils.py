@@ -1,34 +1,24 @@
 """
-Hyperbolic geometry operations for Token Merging enhancement.
+Hyperbolic space operations for Token Merging.
 
-Two core components:
-  1. TokenMergerWithAttnHyperspace: Multi-head attention based token merging
-     with Mobius addition in the Poincare ball, blended with Euclidean merging.
-  2. contrastive_loss_hyperspace: InfoNCE contrastive loss using hyperbolic
-     distances for semantic binding optimization.
-
-Poincare ball operations use:
-  - Custom Artanh autograd for stable backward pass
-  - float64 casting in distance computation to avoid NaN
-  - Per-dtype epsilon for ball projection
-
-References:
-  - Nickel & Kiela, "Poincare Embeddings", NeurIPS 2017
-  - Ganea et al., "Hyperbolic Neural Networks", NeurIPS 2018
+Two improvements over original ToMe:
+1. TokenMergerWithAttnHyperspace: dual-path (Euclidean + Hyperbolic) token
+   merging with multi-head attention and Möbius addition.
+2. contrastive_loss_hyperspace: InfoNCE contrastive loss computed in
+   hyperbolic (Poincaré ball) space for semantic binding.
 """
 
 import math
-import torch
-import torch.nn as nn
 from typing import List
 
+import torch
+import torch.nn as nn
+
 MIN_NORM = 1e-15
-BALL_EPS = {torch.float16: 4e-3, torch.float32: 1e-5, torch.float64: 1e-10}
+BALL_EPS = {torch.float16: 4e-3, torch.float32: 1e-5}
 
 
-# ============================================================
-# Numerically Stable Poincare Ball Primitives
-# ============================================================
+# -------------------- Mapping functions --------------------
 
 class Artanh(torch.autograd.Function):
     @staticmethod
@@ -41,7 +31,7 @@ class Artanh(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output):
-        (input,) = ctx.saved_tensors
+        input, = ctx.saved_tensors
         return grad_output / (1 - input ** 2)
 
 
@@ -53,33 +43,61 @@ def tanh(x):
     return x.clamp(-15, 15).tanh()
 
 
-def project(x, c=1):
-    """Project onto the open Poincare ball with per-dtype epsilon."""
-    norm = x.norm(dim=-1, p=2, keepdim=True).clamp_min(MIN_NORM)
-    eps = BALL_EPS.get(x.dtype, 1e-5)
-    maxnorm = (1 - eps) / (c ** 0.5)
-    cond = norm > maxnorm
-    projected = x / norm * maxnorm
-    return torch.where(cond, projected, x)
+class Artan(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x):
+        x = x.clamp(-1 + 1e-5, 1 - 1e-5)
+        ctx.save_for_backward(x)
+        dtype = x.dtype
+        x = x.double()
+        return x.atan().to(dtype)
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        input, = ctx.saved_tensors
+        return grad_output / (1 + input ** 2)
 
 
-def exp_map(u, c=1):
-    """Exponential map at the origin of the Poincare ball (Euclidean -> Hyperbolic)."""
+def artan(x):
+    return Artan.apply(x)
+
+
+def tan(x):
+    return x.clamp(-15, 15).tan()
+
+
+# -------------------- Euclidean -> Hyperbolic --------------------
+
+def exp_map(u):
+    c = 1
     sqrt_c = c ** 0.5
     u_norm = u.norm(dim=-1, p=2, keepdim=True).clamp_min(MIN_NORM)
     gamma_1 = tanh(sqrt_c * u_norm) * u / (sqrt_c * u_norm)
     return project(gamma_1, c)
 
 
-def log_map(y, c=1):
-    """Logarithmic map at the origin of the Poincare ball (Hyperbolic -> Euclidean)."""
+# -------------------- Hyperbolic -> Euclidean --------------------
+
+def log_map(y):
+    c = 1
     sqrt_c = c ** 0.5
     y_norm = y.norm(dim=-1, p=2, keepdim=True).clamp_min(MIN_NORM)
     return y / y_norm / sqrt_c * artanh(sqrt_c * y_norm)
 
 
-def mobius_addition(x, y, c=1):
-    """Mobius addition in the Poincare ball: x oplus_c y."""
+def project(x, c=1):
+    norm = x.norm(dim=-1, p=2, keepdim=True).clamp_min(MIN_NORM)
+    eps = BALL_EPS[x.dtype]
+    maxnorm = (1 - eps) / (c ** 0.5)
+    cond = norm > maxnorm
+    projected = x / norm * maxnorm
+    return torch.where(cond, projected, x)
+
+
+# -------------------- Möbius addition --------------------
+
+def mobius_addition(x, y):
+    c = 1
     x2 = torch.sum(x * x, dim=-1, keepdim=True)
     y2 = torch.sum(y * y, dim=-1, keepdim=True)
     xy = torch.sum(x * y, dim=-1, keepdim=True)
@@ -88,223 +106,161 @@ def mobius_addition(x, y, c=1):
     return num / denom.clamp_min(MIN_NORM)
 
 
-def hyperbolic_distance(x, y, c=1):
-    """
-    Geodesic distance in the Poincare ball.
-    Uses float64 internally to avoid NaN from atanh near boundary.
-    """
+# -------------------- Hyperbolic distance --------------------
+
+def hyperbolic_distance(x, y, c=1, eval_mode=False):
     sqrt_c = c ** 0.5
+    mobius_minus_x = -x
     minus_x_oplus_y = mobius_addition(
-        (-x).to(dtype=torch.float64), y.to(dtype=torch.float64), c
+        mobius_minus_x.to(dtype=torch.float64),
+        y.to(dtype=torch.float64),
     )
-    pairwise_norm = torch.norm(minus_x_oplus_y, p=2, dim=-1, keepdim=True).to(torch.float64)
-    dist = 2 / sqrt_c * artanh(sqrt_c * pairwise_norm).to(torch.float64)
-    return dist
+    minus_x_oplus_y = minus_x_oplus_y.to(dtype=torch.float64)
+    if eval_mode:
+        pairwise_norm = torch.norm(minus_x_oplus_y, p=2, dim=-1)
+    else:
+        pairwise_norm = torch.norm(minus_x_oplus_y, p=2, dim=-1, keepdim=True)
+        pairwise_norm = pairwise_norm.to(dtype=torch.float64)
+    dist = 2 / sqrt_c * (torch.atanh(sqrt_c * pairwise_norm).to(dtype=torch.float64))
+    return dist.to(dtype=torch.float64)
 
 
-# ============================================================
-# Sinusoidal Positional Encoding for Prompt Embeddings
-# ============================================================
+# -------------------- Sinusoidal positional encoding --------------------
 
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, embed_dim: int, max_length: int = 128):
         super().__init__()
+        self.embed_dim = embed_dim
+        self.max_length = max_length
+
         position = torch.arange(0, max_length).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, embed_dim, 2) * -(math.log(10000.0) / embed_dim))
+        div_term = torch.exp(
+            torch.arange(0, embed_dim, 2) * -(math.log(10000.0) / embed_dim)
+        )
         pe = torch.zeros(max_length, embed_dim)
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe)
+        self.register_buffer('pe', pe)
 
     def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
-        return self.pe.to(position_ids.device)[position_ids]
+        pe_on_device = self.pe.to(position_ids.device)
+        return pe_on_device[position_ids]
 
 
-# ============================================================
-# Token Merging with Multi-Head Attention in Hyperbolic Space
-# ============================================================
+# -------------------- Token Merging with MHA in Hyperbolic space --------------------
 
 class TokenMergerWithAttnHyperspace(nn.Module):
-    """
-    Dual-path token merging:
-      - Euclidean path: standard MHA + addition
-      - Hyperbolic path: MHA on Poincare embeddings + Mobius addition
-      - Final: euclidean + 0.1 * hyperbolic (gentle correction)
-
-    Positional encoding is added via Mobius addition in hyperbolic space,
-    capturing hierarchical structure of noun-attribute relationships.
-    """
-
-    def __init__(self, embed_dim: int = 2048, num_heads: int = 8,
-                 max_length: int = 128, c: float = 1.0):
+    def __init__(
+        self,
+        embed_dim: int = 2048,
+        num_heads: int = 8,
+        max_length: int = 128,
+        c: float = 1.0,
+    ):
         super().__init__()
         self.c = c
         self.pos_encoding = SinusoidalPositionalEncoding(embed_dim, max_length)
-        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
+        self.multihead_attn = nn.MultiheadAttention(
+            embed_dim, num_heads, batch_first=True
+        )
         self.alpha = 1.1
         self.beta = 1.2
 
-    def forward(self, prompt_embeds: torch.Tensor,
-                idx_merge: List[List[List[int]]]) -> torch.Tensor:
+        # Identity initialization: in a training-free setting the MHA weights
+        # must be meaningful without any training. Setting Q/K/V projections
+        # to identity makes attention operate on raw cosine similarity of the
+        # input token embeddings.
+        with torch.no_grad():
+            nn.init.eye_(self.multihead_attn.in_proj_weight[:embed_dim])
+            nn.init.eye_(self.multihead_attn.in_proj_weight[embed_dim:2 * embed_dim])
+            nn.init.eye_(self.multihead_attn.in_proj_weight[2 * embed_dim:])
+            nn.init.zeros_(self.multihead_attn.in_proj_bias)
+            nn.init.eye_(self.multihead_attn.out_proj.weight)
+            nn.init.zeros_(self.multihead_attn.out_proj.bias)
+
+    def forward(
+        self, prompt_embeds: torch.Tensor, idx_merge: List[List[List[int]]]
+    ) -> torch.Tensor:
         device = self.multihead_attn.in_proj_weight.device
         dtype = self.multihead_attn.in_proj_weight.dtype
-        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype)
-
-        needs_squeeze = prompt_embeds.dim() == 2
-        if needs_squeeze:
-            prompt_embeds = prompt_embeds.unsqueeze(0)
+        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype).unsqueeze(0)
 
         batch_size, seq_len, embed_dim = prompt_embeds.size()
         pos = torch.arange(seq_len, device=device, dtype=torch.int)
-        pos_enc = self.pos_encoding(pos).to(device=device, dtype=dtype).unsqueeze(0)
+        pos_encoding = self.pos_encoding(pos).to(device=device, dtype=dtype).unsqueeze(0)
 
-        # Hyperbolic path: positional encoding via Mobius addition
-        pos_enc_hyp = exp_map(pos_enc, self.c).to(device=device, dtype=dtype)
-        prompt_hyp = exp_map(prompt_embeds, self.c).to(device=device, dtype=dtype)
-        prompt_hyp = mobius_addition(prompt_hyp, pos_enc_hyp, self.c)
+        pos_encoding_hyper = exp_map(pos_encoding).to(device=device, dtype=dtype)
+        prompt_embeds_hyper = exp_map(prompt_embeds).to(device=device, dtype=dtype)
+        prompt_embeds_hyper = mobius_addition(prompt_embeds_hyper, pos_encoding_hyper)
 
         for idxs in idx_merge:
             noun_indices = idxs[0]
             attr_indices = idxs[1]
 
-            # Euclidean attention
-            noun_e = prompt_embeds[:, noun_indices, :]
-            attr_e = prompt_embeds[:, attr_indices, :]
-            attn_out_e, _ = self.multihead_attn(query=noun_e, key=attr_e, value=attr_e)
-            merged_e = attn_out_e + noun_e
-            merged_sum_e = self.alpha * merged_e.sum(dim=1) + self.beta * attr_e.sum(dim=1)
+            noun_vectors = prompt_embeds_hyper[:, noun_indices, :]
+            attr_vectors = prompt_embeds_hyper[:, attr_indices, :]
+            noun_vectors_2 = prompt_embeds[:, noun_indices, :]
+            attr_vectors_2 = prompt_embeds[:, attr_indices, :]
 
-            # Hyperbolic attention
-            noun_h = prompt_hyp[:, noun_indices, :]
-            attr_h = prompt_hyp[:, attr_indices, :]
-            attn_out_h, _ = self.multihead_attn(query=noun_h, key=attr_h, value=attr_h)
-            merged_h = mobius_addition(attn_out_h, noun_h, self.c)
-            merged_sum_h = mobius_addition(
-                self.alpha * merged_h.sum(dim=1),
-                self.beta * attr_h.sum(dim=1),
-                self.c,
+            attn_output_2, _ = self.multihead_attn(
+                query=noun_vectors_2,
+                key=attr_vectors_2,
+                value=attr_vectors_2,
             )
 
-            noun_main = noun_indices[0]
-            prompt_embeds[:, noun_main, :] = merged_sum_e
-            prompt_hyp[:, noun_main, :] = merged_sum_h
+            attn_output, _ = self.multihead_attn(
+                query=noun_vectors,
+                key=attr_vectors,
+                value=attr_vectors,
+            )
+
+            merged_vector = mobius_addition(attn_output, noun_vectors)
+            merged_vector_2 = attn_output_2 + noun_vectors_2
+            merged_sum = mobius_addition(
+                self.alpha * merged_vector.sum(dim=1),
+                self.beta * attr_vectors.sum(dim=1),
+            )
+            merged_sum_2 = (
+                self.alpha * merged_vector_2.sum(dim=1)
+                + self.beta * attr_vectors_2.sum(dim=1)
+            )
+
+            noun_main_idx = noun_indices[0]
+            prompt_embeds_hyper[:, noun_main_idx, :] = merged_sum
+            prompt_embeds[:, noun_main_idx, :] = merged_sum_2
             if len(noun_indices) > 1:
+                prompt_embeds_hyper[:, noun_indices[1:], :] = 0
                 prompt_embeds[:, noun_indices[1:], :] = 0
-                prompt_hyp[:, noun_indices[1:], :] = 0
+            prompt_embeds_hyper[:, attr_indices, :] = 0
             prompt_embeds[:, attr_indices, :] = 0
-            prompt_hyp[:, attr_indices, :] = 0
 
-        prompt_hyp = log_map(prompt_hyp, self.c)
-        result = prompt_embeds + 0.1 * prompt_hyp.to(dtype=dtype)
-
-        if needs_squeeze:
-            result = result.squeeze(0)
-        return result
+        prompt_embeds_hyper = log_map(prompt_embeds_hyper)
+        prompt_embeds_hyper = prompt_embeds_hyper.squeeze(0)
+        prompt_embeds = prompt_embeds.squeeze(0)
+        return prompt_embeds + 0.1 * prompt_embeds_hyper
 
 
-# ============================================================
-# Contrastive Loss in Hyperbolic Space (replaces MSE binding loss)
-# ============================================================
+# -------------------- Contrastive loss in Hyperbolic space --------------------
 
 def contrastive_loss_hyperspace(
     query_vec: torch.Tensor,
     target_anchor: torch.Tensor,
     other_anchors: List[torch.Tensor],
     temp: float = 0.07,
-    c: float = 1.0,
 ) -> torch.Tensor:
-    """
-    InfoNCE contrastive loss in the Poincare ball.
-
-    Args:
-        query_vec: Noise prediction from composite token (B, C, H, W)
-        target_anchor: Noise prediction from target phrase (positive)
-        other_anchors: Noise predictions from other phrases (negatives)
-        temp: Temperature for contrastive scaling
-        c: Poincare ball curvature
-
-    The loss encourages the composite token's prediction to be close
-    to its target phrase and far from other phrases in hyperbolic space.
-    """
+    """InfoNCE contrastive loss computed in the Poincaré ball."""
     device = query_vec.device
+    query_vec = exp_map(query_vec)
+    target_anchor = exp_map(target_anchor)
+    other_anchors = [exp_map(anchor) for anchor in other_anchors]
     if len(other_anchors) == 0:
-        return torch.tensor(0.0, device=device, requires_grad=True)
-
-    query_h = exp_map(query_vec, c)
-    target_h = exp_map(target_anchor, c)
-    others_h = [exp_map(a, c) for a in other_anchors]
-
-    dist_pos = hyperbolic_distance(query_h, target_h, c)
-    dist_neg = torch.stack(
-        [hyperbolic_distance(query_h, n, c) for n in others_h], dim=0
-    )
-
+        return torch.tensor(0.0, device=device)
+    dist_pos = hyperbolic_distance(query_vec, target_anchor, c=1)
+    dist_neg_list = []
+    for n_vec in other_anchors:
+        dist_neg_list.append(hyperbolic_distance(query_vec, n_vec, c=1))
+    dist_neg = torch.stack(dist_neg_list, dim=0)
     numerator = torch.exp(-dist_pos / temp)
     denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0)
-    loss = -torch.log(numerator / (denominator + 1e-8) + 1e-8)
-
-    return loss.mean()
-
-
-# ============================================================
-# Entropy Loss (kept Euclidean — attention maps are spatial, not hierarchical)
-# ============================================================
-
-def compute_hyperbolic_entropy_loss(
-    cross_map: torch.Tensor, c: float = 1.0
-) -> torch.Tensor:
-    """Standard Shannon entropy loss for attention concentration.
-
-    Kept Euclidean because attention maps represent spatial pixel distributions,
-    not hierarchical relationships that benefit from hyperbolic geometry.
-    The -2.0 scaling matches the original ToMe paper.
-    """
-    return -2.0 * (cross_map * torch.log(cross_map + 1e-5)).sum()
-
-
-def compute_hyperbolic_pose_loss(
-    pair_pos: torch.Tensor,
-    pos1: torch.Tensor,
-    pos2: torch.Tensor,
-    grid_size: float = 32.0,
-    c: float = 1.0,
-) -> torch.Tensor:
-    """Position loss using hyperbolic geodesic distance."""
-    scale = grid_size
-    p0_h = exp_map((pair_pos[0] / scale).unsqueeze(0), c)
-    p1_h = exp_map((pair_pos[1] / scale).unsqueeze(0), c)
-    t0_h = exp_map((pos1 / scale).unsqueeze(0), c)
-    t1_h = exp_map((pos2 / scale).unsqueeze(0), c)
-    loss = 0.2 * hyperbolic_distance(p0_h, t0_h, c).pow(2).mean()
-    loss = loss + 0.2 * hyperbolic_distance(p1_h, t1_h, c).pow(2).mean()
-    return loss
-
-
-# ============================================================
-# Legacy API compatibility (for non-hyperbolic token merge path)
-# ============================================================
-
-def token_merge_hyperbolic(
-    prompt_embeds: torch.Tensor,
-    idx_merge: List[List[int]],
-    c: float = 1.0,
-) -> torch.Tensor:
-    """Fallback: simple weighted sum (used when TokenMergerWithAttnHyperspace
-    is not available, e.g., in configs without the module initialized)."""
-    for idxs in idx_merge:
-        noun_idx = idxs[0][0]
-        noun_tokens = prompt_embeds[idxs[0]]
-        attr_tokens = prompt_embeds[idxs[1]]
-        composite = 1.1 * noun_tokens.sum(dim=0) + 1.2 * attr_tokens.sum(dim=0)
-        prompt_embeds[noun_idx] = composite
-        if len(idxs[0]) > 1:
-            prompt_embeds[idxs[0][1:]] = 0
-        prompt_embeds[idxs[1]] = 0
-    return prompt_embeds
-
-
-def hyperbolic_spatial_loss(
-    pred: torch.Tensor, target: torch.Tensor, c: float = 1.0
-) -> torch.Tensor:
-    """Legacy fallback: standard MSE (used when contrastive loss not available)."""
-    return torch.nn.functional.mse_loss(pred, target)
+    loss_cont = -torch.log(numerator / (denominator + 1e-8) + 1e-8)
+    return loss_cont.mean()
