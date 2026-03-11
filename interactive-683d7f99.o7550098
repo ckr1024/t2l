@@ -1,0 +1,126 @@
+Spawned interactive shell (PID: 1121919)
+Listening on TCP: 0.0.0.0:56127
+Server started successfully
+Client connected
+Client authenticated successfully
+Window size set to 39x109
+Spawned interactive shell (PID: 1123051)
+Listening on TCP: 0.0.0.0:47342
+Server started successfully
+Client connected
+Client authenticated successfully
+Window size set to 39x109
+Spawned interactive shell (PID: 1134693)
+Listening on TCP: 0.0.0.0:53941
+Server started successfully
+Client connected
+Client authenticated successfully
+Window size set to 41x93
+Client disconnected (0 remaining)
+Spawned interactive shell (PID: 1151536)
+Listening on TCP: 0.0.0.0:57978
+Server started successfully
+Client connected
+Client authenticated successfully
+Window size set to 24x80
+Window size set to 28x84
+Window size set to 32x89
+Window size set to 34x91
+Window size set to 34x92
+Window size set to 35x93
+Window size set to 35x94
+Window size set to 36x95
+Window size set to 37x96
+Window size set to 37x97
+Window size set to 37x98
+Window size set to 37x99
+Window size set to 38x99
+Client disconnected (0 remaining)
+Spawned interactive shell (PID: 1251588)
+Listening on TCP: 0.0.0.0:36372
+Server started successfully
+Client connected
+Client authenticated successfully
+Window size set to 24x80
+Window size set to 31x96
+Window size set to 34x105
+Window size set to 35x110
+Window size set to 36x112
+Client disconnected (0 remaining)
+Stopping server...
+Cleaning up...
+PTY closed
+Shell exited gracefully after PTY close
+Cleanup complete
+Server stopped successfully
+Stopping server...
+Client disconnected (0 remaining)
+Cleaning up...
+PTY closed
+Shell exited gracefully after PTY close
+Cleanup complete
+Server stopped successfully
+Stopping server...
+Cleaning up...
+PTY closed
+Shell exited gracefully after PTY close
+Cleanup complete
+Server stopped successfully
+Stopping server...
+Cleaning up...
+PTY closed
+Shell exited gracefully after PTY close
+Cleanup complete
+Server stopped successfully
+Stopping server...
+Cleaning up...
+PTY closed
+Shell exited gracefully after PTY close
+Cleanup complete
+Server stopped successfully
+Starting daemon for session: 14CPU 128G 1x H200 18h
+Daemon started on k219
+PBS Job ID: 7550098.kman.restech.unsw.edu.au
+Session 683d7f99 daemon started
+Creating PTY server (tcp, interactive) for request f5d909df...
+PTY server started on TCP port 56127
+Creating PTY server (tcp, interactive) for request 72d96952...
+PTY server started on TCP port 47342
+Creating PTY server (tcp, interactive) for request 474c7333...
+PTY server started on TCP port 53941
+Creating PTY server (tcp, interactive) for request b5cfaf76...
+PTY server started on TCP port 57978
+Creating PTY server (tcp, interactive) for request a5b00b47...
+PTY server started on TCP port 36372
+Reached estimated end time (30s before PBS walltime), shutting down...
+Stopping PTY servers...
+Stopping PTY f5d909df...
+Stopping PTY 72d96952...
+Stopping PTY 474c7333...
+Stopping PTY b5cfaf76...
+Stopping PTY a5b00b47...
+Daemon exited cleanly
+
+================================================================================
+                     Resource Usage on 07/03/2026 16:53:06                      
+
+Job Id: 7550098 
+Queue: DEEPCSE
+Walltime: 17:59:37  (requested 18:00:00)
+Job execution was successful. Exit Status 0. 
+
+--------------------------------------------------------------------------------
+|              |             GPUs              |            Memory             |
+--------------------------------------------------------------------------------
+| Node  GPU ID | Requested   Used   Efficiency | Available   Used              |
+| k219    7    |     1       0.14       14%    |143771 MiB  31.36G             |
+--------------------------------------------------------------------------------
+|Total         |     1       0.14      14.0%   |                               |
+--------------------------------------------------------------------------------
+
+--------------------------------------------------------------------------------
+|              |             CPUs              |            Memory             |
+--------------------------------------------------------------------------------
+| Node         | Requested   Used   Efficiency | Requested   Used   Efficiency |
+| k219         |    14       0.24      2.0%    |  128.0gb   10.01gb    7.8%    |
+--------------------------------------------------------------------------------

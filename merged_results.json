@@ -2,206 +2,62 @@
   "main": {
     "SDXL (baseline)": {
       "color": {
-        "blip_vqa": 0.6348658915888038,
-        "blip_std": 0.4609954916925299,
+        "blip_vqa": 0.5915110804703702,
+        "blip_std": 0.35485326411237467,
         "num_images": 300,
-        "num_eval_pairs": 595,
-        "gen_time": 962.702910900116
+        "gen_time": 960.6752278804779
       },
       "shape": {
-        "blip_vqa": 0.130969328589465,
-        "blip_std": 0.2979313853807198,
+        "blip_vqa": 0.3215900930637158,
+        "blip_std": 0.2504237035733077,
         "num_images": 300,
-        "num_eval_pairs": 619,
-        "gen_time": 966.0691685676575
+        "gen_time": 972.5745787620544
       },
       "texture": {
-        "blip_vqa": 0.16246311043232725,
-        "blip_std": 0.34669730910751767,
+        "blip_vqa": 0.3064904030571826,
+        "blip_std": 0.2618257657200448,
         "num_images": 300,
-        "num_eval_pairs": 711,
-        "gen_time": 970.6520192623138
+        "gen_time": 979.5588343143463
       }
     },
     "ToMe (Eucl.)": {
       "color": {
-        "blip_vqa": 0.6715428920897901,
-        "blip_std": 0.4431973487565394,
+        "blip_vqa": 0.3164043456677572,
+        "blip_std": 0.2671582300143881,
         "num_images": 300,
-        "num_eval_pairs": 595,
-        "gen_time": 4088.800081729889
+        "gen_time": 4217.827301263809
       },
       "shape": {
-        "blip_vqa": 0.1436490620395248,
-        "blip_std": 0.3155996338376409,
+        "blip_vqa": 0.23448136700935895,
+        "blip_std": 0.23831346246055463,
         "num_images": 300,
-        "num_eval_pairs": 619,
-        "gen_time": 3745.3586246967316
+        "gen_time": 3847.546768426895
       },
       "texture": {
-        "blip_vqa": 0.17620946090093392,
-        "blip_std": 0.3567405188423846,
+        "blip_vqa": 0.27782603948218093,
+        "blip_std": 0.26667710760990804,
         "num_images": 300,
-        "num_eval_pairs": 711,
-        "gen_time": 4312.077407360077
+        "gen_time": 4388.930042505264
       }
     },
     "ToMe (Hyp.)": {
       "color": {
-        "blip_vqa": 0.5790628349909708,
-        "blip_std": 0.46616842585298257,
+        "blip_vqa": 0.07112975129433563,
+        "blip_std": 0.059562000213064216,
         "num_images": 300,
-        "num_eval_pairs": 595,
-        "gen_time": 2725.472480773926
+        "gen_time": 4396.632368803024
       },
       "shape": {
-        "blip_vqa": 0.09933915276446668,
-        "blip_std": 0.26550365391432384,
+        "blip_vqa": 0.07442572690094468,
+        "blip_std": 0.056676089018328775,
         "num_images": 300,
-        "num_eval_pairs": 619,
-        "gen_time": 2986.7406916618347
+        "gen_time": 4357.77672958374
       },
       "texture": {
-        "blip_vqa": 0.11680571567411688,
-        "blip_std": 0.30236509950857215,
+        "blip_vqa": 0.09313570818878289,
+        "blip_std": 0.05817706653291694,
         "num_images": 300,
-        "num_eval_pairs": 711,
-        "gen_time": 3173.474330663681
-      }
-    }
-  },
-  "time": {
-    "SDXL (baseline)": {
-      "per_image": 3.4542226314544684,
-      "per_image_std": 0.022301641518041492,
-      "total_images": 15
-    },
-    "ToMe (Eucl.)": {
-      "per_image": 14.602624543507893,
-      "per_image_std": 0.12345835508140578,
-      "total_images": 15
-    },
-    "ToMe (Hyp.)": {
-      "per_image": 8.7603093624115,
-      "per_image_std": 0.04495065543771489,
-      "total_images": 15
-    }
-  },
-  "gpt4o": {
-    "SDXL_baseline": {
-      "num_images": 50
-    },
-    "ToMe_Eucl": {
-      "num_images": 48
-    },
-    "ToMe_Hyp": {
-      "num_images": 48
-    }
-  },
-  "qualitative": {
-    "status": "completed",
-    "output_dir": "./paper_results/figures/qualitative"
-  },
-  "attention": {
-    "error": "The size of tensor a (20) must match the size of tensor b (40) at non-singleton dimension 0"
-  },
-  "ablation": {
-    "A": {
-      "color": {
-        "blip_vqa": 0.6348658915888038,
-        "blip_std": 0.4609954916925299
-      },
-      "shape": {
-        "blip_vqa": 0.130969328589465,
-        "blip_std": 0.2979313853807198
-      },
-      "texture": {
-        "blip_vqa": 0.16246311043232725,
-        "blip_std": 0.34669730910751767
-      }
-    },
-    "B": {
-      "color": {
-        "blip_vqa": 0.5861905438395171,
-        "blip_std": 0.45876273539203105
-      },
-      "shape": {
-        "blip_vqa": 0.12027609718126132,
-        "blip_std": 0.2905939331877931
-      },
-      "texture": {
-        "blip_vqa": 0.15450478440611917,
-        "blip_std": 0.3415706023220974
-      }
-    },
-    "C": {
-      "color": {
-        "blip_vqa": 0.6717977678869608,
-        "blip_std": 0.44074833469844427
-      },
-      "shape": {
-        "blip_vqa": 0.13965741783467292,
-        "blip_std": 0.31171820966234215
-      },
-      "texture": {
-        "blip_vqa": 0.2000303646991863,
-        "blip_std": 0.3798939896217198
-      }
-    },
-    "D": {
-      "color": {
-        "blip_vqa": 0.6717720431689814,
-        "blip_std": 0.4487788772222808
-      },
-      "shape": {
-        "blip_vqa": 0.1221315884701913,
-        "blip_std": 0.2898171385436135
-      },
-      "texture": {
-        "blip_vqa": 0.14212716129477035,
-        "blip_std": 0.3247710710815067
-      }
-    },
-    "E": {
-      "color": {
-        "blip_vqa": 0.6773588784199825,
-        "blip_std": 0.4471762610320781
-      },
-      "shape": {
-        "blip_vqa": 0.13131352435764584,
-        "blip_std": 0.3001382290163049
-      },
-      "texture": {
-        "blip_vqa": 0.14202094150272696,
-        "blip_std": 0.32485066609303165
-      }
-    },
-    "F": {
-      "color": {
-        "blip_vqa": 0.5937694655140944,
-        "blip_std": 0.45698354613552816
-      },
-      "shape": {
-        "blip_vqa": 0.11559145567488528,
-        "blip_std": 0.28213634802676335
-      },
-      "texture": {
-        "blip_vqa": 0.15054192178088524,
-        "blip_std": 0.3373576141071623
-      }
-    },
-    "Ours": {
-      "color": {
-        "blip_vqa": 0.651377471635646,
-        "blip_std": 0.44628701797275844
-      },
-      "shape": {
-        "blip_vqa": 0.14709033626269064,
-        "blip_std": 0.31931736264504906
-      },
-      "texture": {
-        "blip_vqa": 0.19451237528002152,
-        "blip_std": 0.3753922018373336
+        "gen_time": 4572.30600810051
       }
     }
   }
