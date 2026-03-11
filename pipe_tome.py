@@ -22,7 +22,8 @@ from diffusers.pipelines.stable_diffusion_xl import StableDiffusionXLPipeline
 
 from utils.ptp_utils import AttentionStore, aggregate_attention, register_self_time
 from utils.hyperbolic_utils import (
-    contrastive_loss_hyperspace, TokenMergerWithAttnHyperspace,
+    TokenMergerWithAttnHyperspace,
+    contrastive_loss_hyperspace,
 )
 from torchvision import transforms as T
 
@@ -359,23 +360,11 @@ class tomePipeline(StableDiffusionXLPipeline):
         stoken = stoken - grad_cond
         return stoken
 
-    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor,
-                  iter_num=3, other_anchor_preds=None):
+    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor, iter_num=3):
         """
-        Optimize composite token via semantic binding loss.
-
-        When use_hyperbolic is enabled and other_anchor_preds is provided,
-        uses contrastive loss in hyperbolic space (InfoNCE with geodesic
-        distances). Otherwise uses standard MSE.
-
-        Args:
-            latents: Latent tensor for this entity
-            t: Current timestep
-            stoken: Composite token embedding to optimize
-            prompt_anchor: Prompt embedding for the target phrase
-            iter_num: Number of optimization iterations
-            other_anchor_preds: Pre-computed noise predictions from other
-                entities (used as negatives in contrastive loss)
+        latents: 128 128 4
+        stoken: dim
+        prompt_anchor: 77 dim
         """
         stoken.requires_grad_(True)
 
@@ -402,13 +391,7 @@ class tomePipeline(StableDiffusionXLPipeline):
                 added_cond_kwargs=self.added_cond_kwargs2,
             ).sample
 
-            if getattr(self, '_use_hyperbolic', False) and other_anchor_preds is not None:
-                loss = contrastive_loss_hyperspace(
-                    noise_pred_token, noise_pred_anchor,
-                    other_anchor_preds, temp=0.07,
-                )
-            else:
-                loss = torch.nn.functional.mse_loss(noise_pred_anchor, noise_pred_token)
+            loss = torch.nn.functional.mse_loss(noise_pred_anchor, noise_pred_token)
 
             stoken = self._update_stoken(stoken, loss, 10000)
             if iteration >= iter_num:
@@ -440,6 +423,88 @@ class tomePipeline(StableDiffusionXLPipeline):
             latents = self.scheduler.step(noise_pred, t, latents, return_dict=False)[0]
 
             self.scheduler._step_index -= 1
+        return stoken, latents[0]
+
+    def opt_token_hyper(
+        self,
+        latents: torch.Tensor,
+        t,
+        stoken,
+        prompt_anchor,
+        other_panchors,
+        iter_num=3,
+    ):
+        """
+        Semantic binding via MSE + hyperbolic contrastive loss.
+        other_panchors: list of prompt embeddings for negative contrastive samples.
+        """
+        stoken.requires_grad_(True)
+        latents = latents.clone().detach().unsqueeze(0)
+        iteration = 0
+
+        with torch.no_grad():
+            target_repr = prompt_anchor[0].mean(dim=0)
+            other_reprs = [p[0].mean(dim=0) for p in other_panchors]
+
+            noise_pred_anchor = self.unet(
+                latents,
+                t,
+                encoder_hidden_states=prompt_anchor,
+                timestep_cond=self.timestep_cond,
+                cross_attention_kwargs=self.cross_attention_kwargs,
+                added_cond_kwargs=self.added_cond_kwargs2,
+            ).sample
+
+        while True:
+            iteration += 1
+            noise_pred_token = self.unet(
+                latents,
+                t,
+                encoder_hidden_states=stoken.unsqueeze(0).unsqueeze(0),
+                timestep_cond=self.timestep_cond,
+                cross_attention_kwargs=self.cross_attention_kwargs,
+                added_cond_kwargs=self.added_cond_kwargs2,
+            ).sample
+
+            loss_mse = torch.nn.functional.mse_loss(
+                noise_pred_anchor, noise_pred_token
+            )
+            loss_contrast = contrastive_loss_hyperspace(
+                stoken, target_repr, other_reprs, temp=0.07
+            )
+            loss = loss_mse + 0.1 * loss_contrast
+
+            stoken = self._update_stoken(stoken, loss, 10000)
+            if iteration >= iter_num:
+                print(
+                    f"Hyper semantic binding loss optimization "
+                    f"({iter_num} iters) — mse={loss_mse:.4f}  contrast={loss_contrast:.4f}"
+                )
+                break
+
+        with torch.no_grad():
+            noise_pred_null = self.unet(
+                latents,
+                t,
+                encoder_hidden_states=self.negative_prompt_embeds,
+                timestep_cond=self.timestep_cond,
+                cross_attention_kwargs=self.cross_attention_kwargs,
+                added_cond_kwargs=self.added_cond_kwargs2,
+            ).sample
+
+            noise_pred = noise_pred_null + self.guidance_scale * (
+                noise_pred_null - noise_pred_anchor
+            )
+            noise_pred = rescale_noise_cfg(
+                noise_pred,
+                noise_pred_anchor,
+                guidance_rescale=self.guidance_rescale,
+            )
+            latents = self.scheduler.step(
+                noise_pred, t, latents, return_dict=False
+            )[0]
+            self.scheduler._step_index -= 1
+
         return stoken, latents[0]
 
     @torch.no_grad()
@@ -515,10 +580,8 @@ class tomePipeline(StableDiffusionXLPipeline):
         tome_control_steps = kwargs.get("tome_control_steps")
         eot_replace_step = kwargs.get("eot_replace_step")
         use_pose_loss = kwargs.get("use_pose_loss")
-        use_token_merge = kwargs.get("use_token_merge", True)
-        use_ets = kwargs.get("use_ets", True)
         use_hyperbolic = kwargs.get("use_hyperbolic", False)
-        hyperbolic_curvature = kwargs.get("hyperbolic_curvature", 1.0)
+        hyper_merger = kwargs.get("hyper_merger", None)
 
         # 0. Default height and width to unet
         height = height or self.default_sample_size * self.vae_scale_factor
@@ -552,18 +615,6 @@ class tomePipeline(StableDiffusionXLPipeline):
         self._cross_attention_kwargs = cross_attention_kwargs
         self._denoising_end = denoising_end
         self._interrupt = False
-        self._use_hyperbolic = use_hyperbolic
-        self._hyperbolic_curvature = hyperbolic_curvature
-
-        # Lazy-initialize hyperbolic token merger on first use
-        if use_hyperbolic and not hasattr(self, '_hyp_merger') or (
-            use_hyperbolic and self._hyp_merger is None
-        ):
-            self._hyp_merger = TokenMergerWithAttnHyperspace(
-                embed_dim=2048, num_heads=8, max_length=128, c=hyperbolic_curvature
-            ).to(device=self.device, dtype=torch.float16)
-        if not hasattr(self, '_hyp_merger'):
-            self._hyp_merger = None
 
         # 2. Define call parameters
         if prompt is not None and isinstance(prompt, str):
@@ -651,11 +702,9 @@ class tomePipeline(StableDiffusionXLPipeline):
         # stoken1, stoken2 = prompt_embeds[0,2], prompt_embeds[0,6]
         # -----------------------------------
         # token merge
-        if not run_standard_sd and token_refinement_steps and use_token_merge:
-            if use_hyperbolic and hasattr(self, '_hyp_merger') and self._hyp_merger is not None:
-                prompt_embeds[0] = self._hyp_merger(
-                    prompt_embeds[0], indices_to_alter
-                )
+        if not run_standard_sd and token_refinement_steps:
+            if use_hyperbolic and hyper_merger is not None:
+                prompt_embeds[0] = hyper_merger(prompt_embeds[0], indices_to_alter)
             else:
                 prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
 
@@ -820,45 +869,41 @@ class tomePipeline(StableDiffusionXLPipeline):
                     if not run_standard_sd:
                         token_control, attention_control = tome_control_steps
                         # EOT replace
-                        if i == eot_replace_step and use_ets:
+                        if i == eot_replace_step:
                             prompt_embeds2[1, prompt_length + 1 :] = prompt_anchor3[0][
                                 prompt_length + 1 :]
                         # semantic binding loss for token refinement
                         if i < token_control:
-                            # Pre-compute anchor noise predictions for contrastive negatives
-                            _anchor_preds = None
-                            if use_hyperbolic and len(panchors) > 1:
-                                _anchor_preds = []
-                                with torch.no_grad():
-                                    for _pa in panchors:
-                                        _pred = self.unet(
-                                            latent_anchor[0].clone().detach().unsqueeze(0),
-                                            t,
-                                            encoder_hidden_states=_pa,
-                                            timestep_cond=self.timestep_cond,
-                                            cross_attention_kwargs=self.cross_attention_kwargs,
-                                            added_cond_kwargs=self.added_cond_kwargs2,
-                                        ).sample
-                                        _anchor_preds.append(_pred)
-
                             for idx, panchor in enumerate(panchors):
                                 stoken = (
                                     prompt_embeds2[1, indices_to_alter[idx][0][0]]
                                     .detach()
                                     .clone()
                                 )
-                                other_preds = None
-                                if _anchor_preds is not None:
-                                    other_preds = [p for j, p in enumerate(_anchor_preds) if j != idx]
-
-                                stoken, latent_anchor[idx] = self.opt_token(
-                                    latent_anchor[idx],
-                                    t,
-                                    stoken,
-                                    panchor,
-                                    token_refinement_steps,
-                                    other_anchor_preds=other_preds,
-                                )
+                                if use_hyperbolic:
+                                    others = [
+                                        panchors[j]
+                                        for j in range(len(panchors))
+                                        if j != idx
+                                    ]
+                                    stoken, latent_anchor[idx] = (
+                                        self.opt_token_hyper(
+                                            latent_anchor[idx],
+                                            t,
+                                            stoken,
+                                            panchor,
+                                            others,
+                                            token_refinement_steps,
+                                        )
+                                    )
+                                else:
+                                    stoken, latent_anchor[idx] = self.opt_token(
+                                        latent_anchor[idx],
+                                        t,
+                                        stoken,
+                                        panchor,
+                                        token_refinement_steps,
+                                    )
                                 prompt_embeds2[1, indices_to_alter[idx][0][0]] = stoken
                         # entropy loss for attention refinement
                         if i < attention_control:
