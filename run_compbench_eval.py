@@ -2,45 +2,111 @@
 """
 T2I-CompBench Evaluation
 ========================
-Generate images with SDXL / ToMe / ToMe_Hyper and compute BLIP-VQA scores
+Generate images with SDXL / ToMe / GeoBind and compute BLIP-VQA scores
 on the color, shape, and texture attribute-binding validation subsets.
 
 Usage
 -----
     # Full pipeline (generate + evaluate)
-    python run_compbench_eval.py
+    python run_compbench_eval.py --output_dir eval_results_v1
 
-    # Generate only (resume-safe: skips existing images)
-    python run_compbench_eval.py --phase generate
+    # Generate only
+    python run_compbench_eval.py --phase generate --output_dir eval_results_v1
 
-    # Evaluate only (after images are generated)
-    python run_compbench_eval.py --phase evaluate
+    # Evaluate only
+    python run_compbench_eval.py --phase evaluate --output_dir eval_results_v1
 
-BLIP-VQA model
---------------
-Uses Salesforce/blip-vqa-base from HuggingFace, which corresponds to the
-BLIP model_base_vqa_capfilt_large checkpoint used by T2I-CompBench (2023).
-Scoring follows the original vqa_prob protocol: P(yes) as the first
-decoder token probability.
+    # Specific methods / subsets
+    python run_compbench_eval.py --methods GeoBind --subsets color
+
+Methods
+-------
+  SDXL     – Standard Stable Diffusion XL baseline (no token merging)
+  ToMe     – Original ToMe paper: Euclidean token merging + MSE binding loss
+  GeoBind  – Hyperbolic token merging + hyperbolic contrastive binding loss
+             + semantic alignment (pipe_geobind.py)
 """
 
 import os
+import sys
 import json
+import logging
 import argparse
+import traceback
+from datetime import datetime
+
 import torch
 import torch.nn.functional as F
 import spacy
 from PIL import Image
 from tqdm import tqdm
 
-from pipe_tome import tomePipeline
 from utils.ptp_utils import AttentionStore, register_attention_control
-from utils.hyperbolic_utils import TokenMergerWithAttnHyperspace
 from prompt_utils import PromptParser
 from transformers import BlipProcessor, BlipForQuestionAnswering
 
 SUBSETS = ["color", "shape", "texture"]
-METHODS = ["SDXL", "ToMe", "ToMe_Hyper"]
+METHODS = ["SDXL", "ToMe", "GeoBind"]
+
+# Which pipeline class each method uses
+_PIPELINE_FOR_METHOD = {
+    "SDXL": "tome",
+    "ToMe": "tome",
+    "GeoBind": "geobind",
+}
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Logging — tee to file + terminal
+# ═══════════════════════════════════════════════════════════════
+
+def setup_logging(output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_path = os.path.join(output_dir, f"eval_log_{ts}.txt")
+
+    fmt = logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S")
+
+    fh = logging.FileHandler(log_path, encoding="utf-8")
+    fh.setFormatter(fmt)
+    sh = logging.StreamHandler(sys.stdout)
+    sh.setFormatter(fmt)
+
+    logger = logging.getLogger("compbench")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    logger.addHandler(fh)
+    logger.addHandler(sh)
+
+    logger.info(f"Logging to {log_path}")
+    return logger
+
+
+log = logging.getLogger("compbench")
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Incremental result persistence
+# ═══════════════════════════════════════════════════════════════
+
+def _results_path(output_dir):
+    return os.path.join(output_dir, "blip_vqa_results.json")
+
+
+def load_existing_results(output_dir):
+    p = _results_path(output_dir)
+    if os.path.isfile(p):
+        with open(p) as f:
+            return json.load(f)
+    return {}
+
+
+def save_results(results, output_dir):
+    os.makedirs(output_dir, exist_ok=True)
+    p = _results_path(output_dir)
+    with open(p, "w") as f:
+        json.dump(results, f, indent=2)
+    log.info(f"Results checkpoint saved → {p}")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -78,7 +144,7 @@ def load_prompts(data_dir, subset):
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Prompt parsing for ToMe
+#  Prompt parsing
 # ═══════════════════════════════════════════════════════════════
 
 def generate_merged_prompt(prompt, doc):
@@ -116,9 +182,67 @@ def parse_prompt_for_tome(prompt, nlp, prompt_parser, tokenizer):
                 filtered_anchor.append(prompt_anchor[i])
 
     merged = generate_merged_prompt(prompt, doc)
-    # prompt_length counts word-piece tokens only (no SOT / EOT)
     prompt_length = len(tokenizer(prompt)["input_ids"]) - 2
     return filtered_idx, filtered_anchor, merged, prompt_length
+
+
+# ═══════════════════════════════════════════════════════════════
+#  Pipeline loading helpers
+# ═══════════════════════════════════════════════════════════════
+
+def _load_pipeline(pipe_type, model_path, device):
+    """Load a pipeline by type ('tome' or 'geobind')."""
+    if pipe_type == "tome":
+        from pipe_tome import tomePipeline
+        pipe = tomePipeline.from_pretrained(
+            model_path, torch_dtype=torch.float16, variant="fp16",
+            safety_checker=None,
+        ).to(device)
+    elif pipe_type == "geobind":
+        from pipe_geobind import geobindPipeline
+        pipe = geobindPipeline.from_pretrained(
+            model_path, torch_dtype=torch.float16, variant="fp16",
+            safety_checker=None,
+        ).to(device)
+    else:
+        raise ValueError(f"Unknown pipe_type: {pipe_type}")
+
+    pipe.unet.requires_grad_(False)
+    pipe.vae.requires_grad_(False)
+    return pipe
+
+
+def _build_call_kwargs(method, prompt, args, ti, pa, merged, pl, controller, thresholds):
+    """Build the keyword-argument dict for the pipeline __call__."""
+    run_standard = (method == "SDXL") or (not ti)
+
+    base = dict(
+        prompt=prompt,
+        guidance_scale=args.guidance_scale,
+        num_inference_steps=args.n_inference_steps,
+        attention_store=controller,
+        indices_to_alter=ti,
+        prompt_anchor=pa,
+        attention_res=32,
+        run_standard_sd=run_standard,
+        thresholds=thresholds,
+        scale_factor=3,
+        scale_range=(1.0, 0.0),
+        prompt3=merged,
+        prompt_length=pl,
+        token_refinement_steps=3,
+        attention_refinement_steps=[6, 6],
+        tome_control_steps=[10, 10],
+        eot_replace_step=0,
+        use_pose_loss=False,
+        negative_prompt="low res, ugly, blurry, artifact, unreal",
+    )
+
+    if method == "ToMe":
+        base["use_hyperbolic"] = False
+        base["hyper_merger"] = None
+
+    return base
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -128,99 +252,80 @@ def parse_prompt_for_tome(prompt, nlp, prompt_parser, tokenizer):
 def generate_all_images(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print("Loading SDXL pipeline …")
-    pipeline = tomePipeline.from_pretrained(
-        args.model_path,
-        torch_dtype=torch.float16,
-        variant="fp16",
-        safety_checker=None,
-    ).to(device)
-    pipeline.unet.requires_grad_(False)
-    pipeline.vae.requires_grad_(False)
-
-    print("Loading spaCy + PromptParser …")
+    log.info("Loading spaCy + PromptParser …")
     nlp = spacy.load("en_core_web_trf")
     prompt_parser = PromptParser(args.model_path)
-
-    hyper_merger = (
-        TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8)
-        .to(device)
-        .eval()
-    )
-
     thresholds = {i: max(26 - i * 0.5, 21) for i in range(20)}
 
-    for subset in args.subsets:
-        prompts = load_prompts(args.data_dir, subset)
-        print(f"\n{'═'*55}")
-        print(f"  Subset: {subset}  ({len(prompts)} prompts)")
-        print(f"{'═'*55}")
+    # Group requested methods by which pipeline they need
+    pipe_groups = {}
+    for m in args.methods:
+        pt = _PIPELINE_FOR_METHOD.get(m, "tome")
+        pipe_groups.setdefault(pt, []).append(m)
 
-        for method in args.methods:
-            out_dir = os.path.join(args.output_dir, method, subset, "samples")
-            os.makedirs(out_dir, exist_ok=True)
+    for pipe_type, methods_in_group in pipe_groups.items():
+        log.info(f"Loading pipeline '{pipe_type}' for methods {methods_in_group} …")
+        pipeline = _load_pipeline(pipe_type, args.model_path, device)
 
-            run_standard = method == "SDXL"
-            use_hyper = method == "ToMe_Hyper"
+        for subset in args.subsets:
+            prompts = load_prompts(args.data_dir, subset)
+            log.info(f"{'═'*55}")
+            log.info(f"  Subset: {subset}  ({len(prompts)} prompts)")
+            log.info(f"{'═'*55}")
 
-            existing = len([f for f in os.listdir(out_dir) if f.endswith(".png")])
-            if existing >= len(prompts):
-                print(f"  [{method}] {existing} images exist — skipping.")
-                continue
-            print(f"\n  [{method}] generating ({existing}/{len(prompts)} done) …")
+            for method in methods_in_group:
+                out_dir = os.path.join(args.output_dir, method, subset, "samples")
+                os.makedirs(out_dir, exist_ok=True)
 
-            for idx, prompt in enumerate(tqdm(prompts, desc=f"  {method}")):
-                img_path = os.path.join(out_dir, f"{prompt}_{idx}.png")
-                if os.path.exists(img_path):
+                existing = len([f for f in os.listdir(out_dir) if f.endswith(".png")])
+                if existing >= len(prompts):
+                    log.info(f"  [{method}] {existing} images exist — skipping.")
                     continue
+                log.info(f"  [{method}] generating ({existing}/{len(prompts)} done) …")
 
-                g = torch.Generator(device).manual_seed(args.seed)
+                n_generated, n_errors = 0, 0
+                for idx, prompt in enumerate(tqdm(prompts, desc=f"  {method}")):
+                    img_path = os.path.join(out_dir, f"{prompt}_{idx}.png")
+                    if os.path.exists(img_path):
+                        continue
 
-                try:
-                    ti, pa, merged, pl = parse_prompt_for_tome(
-                        prompt, nlp, prompt_parser, pipeline.tokenizer
+                    g = torch.Generator(device).manual_seed(args.seed)
+
+                    try:
+                        ti, pa, merged, pl = parse_prompt_for_tome(
+                            prompt, nlp, prompt_parser, pipeline.tokenizer
+                        )
+                    except Exception:
+                        ti, pa, merged, pl = [], [], prompt, 0
+
+                    controller = AttentionStore()
+                    register_attention_control(pipeline, controller)
+
+                    kw = _build_call_kwargs(
+                        method, prompt, args, ti, pa, merged, pl,
+                        controller, thresholds,
                     )
-                except Exception:
-                    ti, pa, merged, pl = [], [], prompt, 0
+                    kw["generator"] = g
 
-                run_std_this = run_standard or (not ti)
+                    try:
+                        out = pipeline(**kw)
+                        out.images[0].save(img_path)
+                        n_generated += 1
+                    except Exception as e:
+                        tqdm.write(f"    [ERROR] '{prompt}': {e}")
+                        log.error(f"  Generation error [{method}/{subset}] "
+                                  f"'{prompt}': {e}")
+                        Image.new("RGB", (1024, 1024), "gray").save(img_path)
+                        n_errors += 1
 
-                controller = AttentionStore()
-                register_attention_control(pipeline, controller)
+                log.info(f"  [{method}/{subset}] done — "
+                         f"generated={n_generated}, errors={n_errors}")
 
-                try:
-                    out = pipeline(
-                        prompt=prompt,
-                        guidance_scale=args.guidance_scale,
-                        generator=g,
-                        num_inference_steps=args.n_inference_steps,
-                        attention_store=controller,
-                        indices_to_alter=ti,
-                        prompt_anchor=pa,
-                        attention_res=32,
-                        run_standard_sd=run_std_this,
-                        thresholds=thresholds,
-                        scale_factor=3,
-                        scale_range=(1.0, 0.0),
-                        prompt3=merged,
-                        prompt_length=pl,
-                        token_refinement_steps=3,
-                        attention_refinement_steps=[6, 6],
-                        tome_control_steps=[10, 10],
-                        eot_replace_step=0,
-                        use_pose_loss=False,
-                        negative_prompt="low res, ugly, blurry, artifact, unreal",
-                        use_hyperbolic=use_hyper,
-                        hyper_merger=hyper_merger if use_hyper else None,
-                    )
-                    out.images[0].save(img_path)
-                except Exception as e:
-                    tqdm.write(f"    [ERROR] '{prompt}': {e}")
-                    Image.new("RGB", (1024, 1024), "gray").save(img_path)
+        log.info(f"Unloading pipeline '{pipe_type}' …")
+        del pipeline
+        torch.cuda.empty_cache()
 
-    print("\nGeneration phase complete.")
-    del pipeline, hyper_merger
-    torch.cuda.empty_cache()
+    log.info("Generation phase complete.")
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -247,19 +352,15 @@ def compute_vqa_yes_prob(model, processor, image, question, device):
     return probs[0, yes_ids[0]].item()
 
 
-def evaluate_subset_method(images_dir, prompts, model, processor, nlp_sm, device, np_num):
+def evaluate_subset_method(images_dir, prompts, model, processor, nlp_sm, device,
+                           np_num, detail_save_path=None):
     """
-    BLIP-VQA scoring following T2I-CompBench protocol:
-      • for each noun-phrase slot i in [0, np_num):
-          – if prompt has ≥ i+1 noun-phrases → score = P(yes | image, "{NP}?")
-          – otherwise → score = 1  (no penalty)
-      • image score  = ∏ᵢ score_i
-      • subset score = mean of image scores
+    BLIP-VQA scoring following T2I-CompBench protocol.
+    Optionally saves per-image detail to *detail_save_path*.
     """
     n = len(prompts)
     reward = torch.ones((n, np_num), device=device)
 
-    # Pre-compute noun phrases once
     all_nps = []
     for prompt in prompts:
         doc = nlp_sm(prompt)
@@ -270,16 +371,22 @@ def evaluate_subset_method(images_dir, prompts, model, processor, nlp_sm, device
         ]
         all_nps.append(nps)
 
-    # Process each image once, score all its noun-phrase slots
+    per_image_details = []
+
     for k, prompt in enumerate(tqdm(prompts, desc="    BLIP-VQA")):
         nps = all_nps[k]
+        detail = {"prompt": prompt, "index": k, "noun_phrases": nps, "scores": []}
+
         if not nps:
+            per_image_details.append(detail)
             continue
 
         img_path = os.path.join(images_dir, f"{prompt}_{k}.png")
         if not os.path.exists(img_path):
             for j in range(min(len(nps), np_num)):
                 reward[k, j] = 0.0
+                detail["scores"].append({"np": nps[j], "score": 0.0, "note": "image_missing"})
+            per_image_details.append(detail)
             continue
 
         image = Image.open(img_path).convert("RGB")
@@ -288,49 +395,102 @@ def evaluate_subset_method(images_dir, prompts, model, processor, nlp_sm, device
                 model, processor, image, f"{np_text}?", device
             )
             reward[k, j] = score
+            detail["scores"].append({"np": np_text, "score": round(score, 6)})
 
-    # Per-slot diagnostics
+        per_image_details.append(detail)
+
     max_np = max(len(nps) for nps in all_nps) if all_nps else 0
     for j in range(min(max_np, np_num)):
         slot_scores = [reward[k, j].item() for k in range(n) if len(all_nps[k]) > j]
         if slot_scores:
-            print(f"    NP slot {j}: mean P(yes) = {sum(slot_scores)/len(slot_scores):.4f}")
+            log.info(f"    NP slot {j}: mean P(yes) = "
+                     f"{sum(slot_scores)/len(slot_scores):.4f}")
 
     reward_final = reward[:, 0]
     for i in range(1, np_num):
         reward_final = reward_final * reward[:, i]
-    return reward_final.mean().item()
+
+    final_score = reward_final.mean().item()
+
+    for k in range(n):
+        per_image_details[k]["image_score"] = round(reward_final[k].item(), 6)
+
+    if detail_save_path:
+        os.makedirs(os.path.dirname(detail_save_path), exist_ok=True)
+        with open(detail_save_path, "w") as f:
+            json.dump(
+                {"blip_vqa_score": round(final_score, 6),
+                 "per_image": per_image_details},
+                f, indent=2, ensure_ascii=False,
+            )
+        log.info(f"    Per-image detail saved → {detail_save_path}")
+
+    return final_score
 
 
 def evaluate_all(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    print(f"\nLoading BLIP-VQA model: {args.blip_model} …")
-    processor = BlipProcessor.from_pretrained(args.blip_model)
-    model = (
-        BlipForQuestionAnswering.from_pretrained(args.blip_model).to(device).eval()
-    )
-    nlp_sm = spacy.load("en_core_web_sm")
+    results = load_existing_results(args.output_dir)
 
-    results = {}
+    log.info(f"Loading BLIP-VQA model: {args.blip_model} …")
+    try:
+        processor = BlipProcessor.from_pretrained(args.blip_model)
+        model = (
+            BlipForQuestionAnswering.from_pretrained(args.blip_model)
+            .to(device).eval()
+        )
+    except Exception:
+        log.error(f"Failed to load BLIP model:\n{traceback.format_exc()}")
+        return results
+
+    try:
+        nlp_sm = spacy.load("en_core_web_sm")
+    except OSError:
+        log.error("spacy model 'en_core_web_sm' not found. "
+                  "Install with: python -m spacy download en_core_web_sm")
+        return results
+
     for subset in args.subsets:
         prompts = load_prompts(args.data_dir, subset)
-        results[subset] = {}
+        if subset not in results:
+            results[subset] = {}
 
         for method in args.methods:
+            existing_score = results[subset].get(method)
+            if existing_score is not None:
+                log.info(f"  [{method}/{subset}] already evaluated: "
+                         f"{existing_score} — skip")
+                continue
+
             images_dir = os.path.join(args.output_dir, method, subset, "samples")
             if not os.path.isdir(images_dir):
-                print(f"  [SKIP] {images_dir} not found")
+                log.warning(f"  [SKIP] {images_dir} not found")
                 results[subset][method] = None
+                save_results(results, args.output_dir)
                 continue
-            print(f"\n{'─'*50}")
-            print(f"  Evaluating  {method} / {subset}")
-            print(f"{'─'*50}")
-            score = evaluate_subset_method(
-                images_dir, prompts, model, processor, nlp_sm, device, args.np_num
+
+            log.info(f"{'─'*50}")
+            log.info(f"  Evaluating  {method} / {subset}")
+            log.info(f"{'─'*50}")
+
+            detail_path = os.path.join(
+                args.output_dir, method, subset, "vqa_detail.json"
             )
-            results[subset][method] = round(score, 4)
-            print(f"  ➜ BLIP-VQA score = {score:.4f}")
+
+            try:
+                score = evaluate_subset_method(
+                    images_dir, prompts, model, processor, nlp_sm, device,
+                    args.np_num, detail_save_path=detail_path,
+                )
+                results[subset][method] = round(score, 4)
+                log.info(f"  ➜ BLIP-VQA score = {score:.4f}")
+            except Exception:
+                log.error(f"  Evaluation FAILED for {method}/{subset}:\n"
+                          f"{traceback.format_exc()}")
+                results[subset][method] = None
+
+            save_results(results, args.output_dir)
 
     del model, processor
     torch.cuda.empty_cache()
@@ -341,34 +501,29 @@ def evaluate_all(args):
 #  Phase 3 — Report
 # ═══════════════════════════════════════════════════════════════
 
-def report_results(results, output_dir):
-    os.makedirs(output_dir, exist_ok=True)
-    json_path = os.path.join(output_dir, "blip_vqa_results.json")
-    with open(json_path, "w") as f:
-        json.dump(results, f, indent=2)
-
-    subsets = list(results.keys())
+def print_result_table(results):
+    subsets = [s for s in SUBSETS if s in results]
     methods_set = set()
     for s in subsets:
         methods_set.update(results[s].keys())
     methods = [m for m in METHODS if m in methods_set]
 
-    print("\n" + "=" * 62)
-    print("  T2I-CompBench  BLIP-VQA Scores")
-    print("=" * 62)
+    log.info("")
+    log.info("=" * 62)
+    log.info("  T2I-CompBench  BLIP-VQA Scores")
+    log.info("=" * 62)
     header = f"  {'Method':<16}"
     for s in subsets:
         header += f"{s.capitalize():<14}"
-    print(header)
-    print("  " + "-" * 56)
+    log.info(header)
+    log.info("  " + "-" * 56)
     for m in methods:
         row = f"  {m:<16}"
         for s in subsets:
-            val = results[s].get(m)
+            val = results.get(s, {}).get(m)
             row += f"{val:<14.4f}" if val is not None else f"{'N/A':<14}"
-        print(row)
-    print("=" * 62)
-    print(f"  Results saved → {json_path}\n")
+        log.info(row)
+    log.info("=" * 62)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -377,13 +532,22 @@ def report_results(results, output_dir):
 
 def main():
     args = parse_args()
+    setup_logging(args.output_dir)
+
+    log.info(f"Phase: {args.phase}  |  Subsets: {args.subsets}  "
+             f"|  Methods: {args.methods}")
+    log.info(f"Output dir: {os.path.abspath(args.output_dir)}")
 
     if args.phase in ("all", "generate"):
-        generate_all_images(args)
+        try:
+            generate_all_images(args)
+        except Exception:
+            log.error(f"Generation phase FAILED:\n{traceback.format_exc()}")
 
     if args.phase in ("all", "evaluate"):
         results = evaluate_all(args)
-        report_results(results, args.output_dir)
+        print_result_table(results)
+        log.info(f"Final results → {_results_path(args.output_dir)}")
 
 
 if __name__ == "__main__":
