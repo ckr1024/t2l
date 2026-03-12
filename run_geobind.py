@@ -35,7 +35,7 @@ from PIL import Image
 from tqdm import tqdm
 from transformers import BlipProcessor, BlipForQuestionAnswering
 
-from pipe_geobind import geobindPipeline
+from pipe_geobind import geobindPipeline, TokenMergerWithAttnHyperspace
 from utils.ptp_utils import AttentionStore, register_attention_control
 from prompt_utils import PromptParser
 
@@ -149,6 +149,11 @@ def generate_images(args):
     pipeline.unet.requires_grad_(False)
     pipeline.vae.requires_grad_(False)
 
+    hyper_merger = (
+        TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8)
+        .to(device).eval()
+    )
+
     log.info("Loading spaCy + PromptParser …")
     nlp = spacy.load("en_core_web_trf")
     prompt_parser = PromptParser(args.model_path)
@@ -206,6 +211,7 @@ def generate_images(args):
                     eot_replace_step=0,
                     use_pose_loss=False,
                     negative_prompt="low res, ugly, blurry, artifact, unreal",
+                    hyper_merger=hyper_merger,
                 )
                 out.images[0].save(img_path)
                 n_ok += 1

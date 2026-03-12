@@ -191,7 +191,8 @@ def parse_prompt_for_tome(prompt, nlp, prompt_parser, tokenizer):
 # ═══════════════════════════════════════════════════════════════
 
 def _load_pipeline(pipe_type, model_path, device):
-    """Load a pipeline by type ('tome' or 'geobind')."""
+    """Load a pipeline by type ('tome' or 'geobind'). Returns (pipe, extras)."""
+    extras = {}
     if pipe_type == "tome":
         from pipe_tome import tomePipeline
         pipe = tomePipeline.from_pretrained(
@@ -199,20 +200,25 @@ def _load_pipeline(pipe_type, model_path, device):
             safety_checker=None,
         ).to(device)
     elif pipe_type == "geobind":
-        from pipe_geobind import geobindPipeline
+        from pipe_geobind import geobindPipeline, TokenMergerWithAttnHyperspace
         pipe = geobindPipeline.from_pretrained(
             model_path, torch_dtype=torch.float16, variant="fp16",
             safety_checker=None,
         ).to(device)
+        extras["hyper_merger"] = (
+            TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8)
+            .to(device).eval()
+        )
     else:
         raise ValueError(f"Unknown pipe_type: {pipe_type}")
 
     pipe.unet.requires_grad_(False)
     pipe.vae.requires_grad_(False)
-    return pipe
+    return pipe, extras
 
 
-def _build_call_kwargs(method, prompt, args, ti, pa, merged, pl, controller, thresholds):
+def _build_call_kwargs(method, prompt, args, ti, pa, merged, pl, controller,
+                       thresholds, extras=None):
     """Build the keyword-argument dict for the pipeline __call__."""
     run_standard = (method == "SDXL") or (not ti)
 
@@ -242,6 +248,9 @@ def _build_call_kwargs(method, prompt, args, ti, pa, merged, pl, controller, thr
         base["use_hyperbolic"] = False
         base["hyper_merger"] = None
 
+    if method == "GeoBind" and extras and "hyper_merger" in extras:
+        base["hyper_merger"] = extras["hyper_merger"]
+
     return base
 
 
@@ -265,7 +274,7 @@ def generate_all_images(args):
 
     for pipe_type, methods_in_group in pipe_groups.items():
         log.info(f"Loading pipeline '{pipe_type}' for methods {methods_in_group} …")
-        pipeline = _load_pipeline(pipe_type, args.model_path, device)
+        pipeline, extras = _load_pipeline(pipe_type, args.model_path, device)
 
         for subset in args.subsets:
             prompts = load_prompts(args.data_dir, subset)
@@ -303,7 +312,7 @@ def generate_all_images(args):
 
                     kw = _build_call_kwargs(
                         method, prompt, args, ti, pa, merged, pl,
-                        controller, thresholds,
+                        controller, thresholds, extras=extras,
                     )
                     kw["generator"] = g
 

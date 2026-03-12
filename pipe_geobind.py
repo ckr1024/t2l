@@ -908,16 +908,17 @@ class geobindPipeline(StableDiffusionXLPipeline):
             clip_skip=self.clip_skip,
         )
 
-        # stoken1, stoken2 = prompt_embeds[0,2], prompt_embeds[0,6]
         # -----------------------------------
         # token merge
         use_our_method = True
         if use_our_method:
-            #修改1,2使用的地方
-            merger = TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8, max_length=128)
+            hyper_merger = kwargs.get("hyper_merger", None)
+            if hyper_merger is None:
+                hyper_merger = TokenMergerWithAttnHyperspace(
+                    embed_dim=2048, num_heads=8, max_length=128
+                ).to(device)
             if not run_standard_sd and token_refinement_steps:
-                print(f'prompt_embeds shape is {prompt_embeds.shape}')
-                prompt_embeds[0] = merger(prompt_embeds[0], indices_to_alter)
+                prompt_embeds[0] = hyper_merger(prompt_embeds[0], indices_to_alter)
         else:
             if not run_standard_sd and token_refinement_steps:
                 prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
@@ -1084,21 +1085,16 @@ class geobindPipeline(StableDiffusionXLPipeline):
                         token_control, attention_control = tome_control_steps
                         # EOT replace
                         if i == eot_replace_step:
-                            prompt_embeds[1, prompt_length + 1 :] = prompt_anchor3[0][
+                            prompt_embeds2[1, prompt_length + 1 :] = prompt_anchor3[0][
                                 prompt_length + 1 :]
                         if i < token_control:
                             for idx, panchor in enumerate(panchors):
-                                # print(f'prompt_embeds is {prompt_embeds}')
-                                # print(f'indices_to_alter[idx][0][0] is {indices_to_alter[idx][0][0]}')
-                                # print(f'prompt_embeds[1, indices_to_alter[idx][0][0]] is {prompt_embeds[1, indices_to_alter[idx][0][0]]}')
                                 stoken = (
-                                    prompt_embeds[1, indices_to_alter[idx][0][0]]
+                                    prompt_embeds2[1, indices_to_alter[idx][0][0]]
                                     .detach()
                                     .clone()
                                 )
-                                # print(f'stoken for self.opt_token is {stoken}')
-                                other_panchors = [p for i, p in enumerate(panchors) if i != idx]
-                                # print(f'stoken input is {stoken}')
+                                other_panchors = [p for j, p in enumerate(panchors) if j != idx]
                                 stoken, latent_anchor[idx] = self.opt_token(
                                     latent_anchor[idx],
                                     t,
@@ -1108,7 +1104,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                     other_panchors,
                                     token_refinement_steps,
                                 )
-                                prompt_embeds[1, indices_to_alter[idx][0][0]] = stoken
+                                prompt_embeds2[1, indices_to_alter[idx][0][0]] = stoken
                         # entropy loss for attention refinement
                         if i < attention_control:
                             latents_up, loss, prompt_embeds2 = (
@@ -1116,7 +1112,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                     latents=latents_up,
                                     indices_to_alter=indices_to_alter,
                                     threshold=thresholds[i],
-                                    text_embeddings=prompt_embeds,
+                                    text_embeddings=prompt_embeds2,
                                     attention_store=attention_store,
                                     step_size=scale_factor * scale_range[i],
                                     t=t,
