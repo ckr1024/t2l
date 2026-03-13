@@ -105,10 +105,8 @@ def contrastive_loss_hyperspace(
     for n_vec in other_anchors:
         dist_neg_list.append(hyperbolic_distance(query_vec, n_vec, c = 1))  
     dist_neg = torch.stack(dist_neg_list, dim=0) 
-    numerator = torch.exp(-dist_pos / temp) 
-    print(f'numerator is {numerator}')
-    denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0) 
-    print(f'denominator is {denominator}')
+    numerator = torch.exp(-dist_pos / temp)
+    denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0)
     loss_cont = -torch.log(numerator / (denominator + 1e-8) + 1e-8)  
     return loss_cont.mean()  
 
@@ -255,8 +253,8 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         self.pos_encoding = SinusoidalPositionalEncoding(embed_dim, max_length)
         self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
 
-        self.alpha = 1.1
-        self.beta = 1.2
+        self.alpha = 1.5
+        self.beta = 0.6
 
     def forward(self, prompt_embeds: torch.Tensor, idx_merge: list[list[list[int]]]):
         device = self.multihead_attn.in_proj_weight.device  # Ensure compatibility with model weights
@@ -634,17 +632,35 @@ class geobindPipeline(StableDiffusionXLPipeline):
         stoken = stoken - grad_cond
         return stoken
 
-    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor, use_our_method: bool, other_anchors, iter_num=3, temperature=0.07, lambda_mse=1.0, lambda_cont=1e-6):
+    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor,
+                  use_our_method: bool, other_anchors, iter_num=5,
+                  temperature=0.07,
+                  lambda_mse=5.0, lambda_cont=0.05, lambda_reg=0.8,
+                  step_size=20000):
         """
-        latents: 128 128 4
-        stoken: dim
-        prompt_anchor: 77 dim
+        Semantic binding optimisation with regularisation to preserve noun
+        semantics.
+
+        lambda_mse  — weight for the language (noise-matching) loss
+        lambda_cont — weight for the hyperbolic contrastive loss
+        lambda_reg  — weight for the drift regularisation (keeps stoken
+                      close to its original value so noun semantics survive)
+        step_size   — gradient-descent learning rate
         """
         stoken.requires_grad_(True)
+        stoken_orig = stoken.detach().clone()
+
+        with torch.no_grad():
+            pos_idx = 1 if prompt_anchor.ndim >= 3 and prompt_anchor.shape[0] == 2 else 0
+            target_repr = prompt_anchor[pos_idx].mean(dim=0)
+            other_reprs = [
+                oa[pos_idx].mean(dim=0) if (oa.ndim >= 3 and oa.shape[0] == 2) else oa.mean(dim=0)
+                for oa in other_anchors
+            ]
 
         latents = latents.clone().detach().unsqueeze(0)
         iteration = 0
-     
+
         with torch.no_grad():
             noise_pred_anchor = self.unet(
                 latents,
@@ -656,7 +672,6 @@ class geobindPipeline(StableDiffusionXLPipeline):
             ).sample
         while True:
             iteration += 1
-            # print(f'stoken for noise is is {stoken}')
             noise_pred_token = self.unet(
                 latents,
                 t,
@@ -665,31 +680,25 @@ class geobindPipeline(StableDiffusionXLPipeline):
                 cross_attention_kwargs=self.cross_attention_kwargs,
                 added_cond_kwargs=self.added_cond_kwargs2,
             ).sample
-        
-            loss_mse = torch.nn.functional.mse_loss(noise_pred_token, noise_pred_anchor)
-            # print(f'loss_mse is {loss_mse}')
-            use_our_method = True
-            # ---------------------------------双曲空间中的对比学习
-            if use_our_method:
-                # print(f'stoken for contrastive learning is {stoken}')
-                loss_cont = contrastive_loss_hyperspace(
-                     stoken,
-                     prompt_anchor,
-                     other_anchors,
-                     temp=temperature
-                 )
-                print(f'loss_mse loss is {loss_mse}')
-                print(f'loss_cont loss is {loss_cont}')
-                total_loss = lambda_mse * loss_mse + lambda_cont * loss_cont
-                print(f'total_loss is {total_loss}')
-            else:
-                total_loss = loss_mse
 
-            stoken = self._update_stoken(stoken, total_loss, 10000)
-            if iteration >= iter_num:
-                print(
-                    f"Semantic binding loss optimization Exceeded max number of iterations ({iter_num}) "
+            loss_mse = torch.nn.functional.mse_loss(noise_pred_token, noise_pred_anchor)
+            loss_reg = torch.nn.functional.mse_loss(stoken, stoken_orig)
+
+            if use_our_method:
+                loss_cont = contrastive_loss_hyperspace(
+                    stoken,
+                    target_repr,
+                    other_reprs,
+                    temp=temperature,
                 )
+                total_loss = (lambda_mse * loss_mse
+                              + lambda_cont * loss_cont
+                              + lambda_reg * loss_reg)
+            else:
+                total_loss = lambda_mse * loss_mse + lambda_reg * loss_reg
+
+            stoken = self._update_stoken(stoken, total_loss, step_size)
+            if iteration >= iter_num:
                 break
 
         with torch.no_grad():

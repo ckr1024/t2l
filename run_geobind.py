@@ -1,39 +1,27 @@
 #!/usr/bin/env python
 """
-GeoBind — Generate + Auto-Evaluate
-====================================
+GeoBind — Image Generation
+============================
 Generate images using the GeoBind pipeline (hyperbolic token merging +
-contrastive binding loss), then automatically run BLIP-VQA evaluation.
+contrastive binding loss) on T2I-CompBench attribute-binding subsets.
 
 Usage
 -----
-    # Generate + evaluate, default output dir
-    python run_geobind.py --output_dir eval_results
-
-    # Specific subsets only
+    python run_geobind.py
     python run_geobind.py --output_dir eval_results --subsets color texture
-
-    # Generate only, skip evaluation
-    python run_geobind.py --output_dir eval_results --skip_eval
-
-    # Skip generation (images exist), evaluate only
-    python run_geobind.py --output_dir eval_results --eval_only
+    python run_geobind.py --seed 123
 """
 
 import os
 import sys
-import json
 import logging
 import argparse
-import traceback
 from datetime import datetime
 
 import torch
-import torch.nn.functional as F
 import spacy
 from PIL import Image
 from tqdm import tqdm
-from transformers import BlipProcessor, BlipForQuestionAnswering
 
 from pipe_geobind import geobindPipeline, TokenMergerWithAttnHyperspace
 from utils.ptp_utils import AttentionStore, register_attention_control
@@ -66,26 +54,6 @@ def setup_logging(output_dir):
     return logger
 
 log = logging.getLogger("geobind")
-
-# ─────────────────────────────────────────────────────────
-#  Result persistence
-# ─────────────────────────────────────────────────────────
-
-def _results_path(output_dir):
-    return os.path.join(output_dir, "blip_vqa_results.json")
-
-def load_results(output_dir):
-    p = _results_path(output_dir)
-    if os.path.isfile(p):
-        with open(p) as f:
-            return json.load(f)
-    return {}
-
-def save_results(results, output_dir):
-    p = _results_path(output_dir)
-    with open(p, "w") as f:
-        json.dump(results, f, indent=2)
-    log.info(f"Results saved → {p}")
 
 # ─────────────────────────────────────────────────────────
 #  Data & prompt parsing
@@ -135,7 +103,7 @@ def parse_prompt(prompt, nlp, prompt_parser, tokenizer):
     return filtered_idx, filtered_anchor, merged, prompt_length
 
 # ─────────────────────────────────────────────────────────
-#  Phase 1 — Generation (GeoBind only)
+#  Image generation
 # ─────────────────────────────────────────────────────────
 
 def generate_images(args):
@@ -159,6 +127,7 @@ def generate_images(args):
     prompt_parser = PromptParser(args.model_path)
     thresholds = {i: max(26 - i * 0.5, 21) for i in range(20)}
 
+    total_ok, total_err = 0, 0
     for subset in args.subsets:
         prompts = load_prompts(args.data_dir, subset)
         out_dir = os.path.join(args.output_dir, METHOD, subset, "samples")
@@ -205,7 +174,7 @@ def generate_images(args):
                     scale_range=(1.0, 0.0),
                     prompt3=merged,
                     prompt_length=pl,
-                    token_refinement_steps=3,
+                    token_refinement_steps=5,
                     attention_refinement_steps=[6, 6],
                     tome_control_steps=[10, 10],
                     eot_replace_step=0,
@@ -222,163 +191,27 @@ def generate_images(args):
                 n_err += 1
 
         log.info(f"  [{subset}] done — generated={n_ok}, errors={n_err}")
+        total_ok += n_ok
+        total_err += n_err
 
     del pipeline
     torch.cuda.empty_cache()
-    log.info("Generation complete.")
-
-# ─────────────────────────────────────────────────────────
-#  Phase 2 — BLIP-VQA evaluation
-# ─────────────────────────────────────────────────────────
-
-def compute_vqa_yes_prob(model, processor, image, question, device):
-    inputs = processor(image, question, return_tensors="pt").to(device)
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs, output_scores=True,
-            return_dict_in_generate=True, max_new_tokens=10,
-        )
-    probs = F.softmax(outputs.scores[0], dim=-1)
-    yes_ids = processor.tokenizer("yes", add_special_tokens=False)["input_ids"]
-    return probs[0, yes_ids[0]].item()
-
-
-def evaluate_images(args):
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    results = load_results(args.output_dir)
-
-    log.info(f"Loading BLIP-VQA: {args.blip_model} …")
-    try:
-        processor = BlipProcessor.from_pretrained(args.blip_model)
-        model = BlipForQuestionAnswering.from_pretrained(args.blip_model).to(device).eval()
-    except Exception:
-        log.error(f"Failed to load BLIP:\n{traceback.format_exc()}")
-        return results
-
-    try:
-        nlp_sm = spacy.load("en_core_web_sm")
-    except OSError:
-        log.error("spacy en_core_web_sm not found. Run: python -m spacy download en_core_web_sm")
-        return results
-
-    for subset in args.subsets:
-        if subset not in results:
-            results[subset] = {}
-
-        existing = results[subset].get(METHOD)
-        if existing is not None:
-            log.info(f"  [{METHOD}/{subset}] already evaluated: {existing} — skip")
-            continue
-
-        images_dir = os.path.join(args.output_dir, METHOD, subset, "samples")
-        if not os.path.isdir(images_dir):
-            log.warning(f"  [SKIP] {images_dir} not found")
-            results[subset][METHOD] = None
-            save_results(results, args.output_dir)
-            continue
-
-        prompts = load_prompts(args.data_dir, subset)
-        log.info(f"{'─'*50}")
-        log.info(f"  Evaluating  {METHOD} / {subset}")
-        log.info(f"{'─'*50}")
-
-        n = len(prompts)
-        reward = torch.ones((n, args.np_num), device=device)
-
-        all_nps = []
-        for prompt in prompts:
-            doc = nlp_sm(prompt)
-            nps = [chunk.text for chunk in doc.noun_chunks
-                   if chunk.text not in ["top", "the side", "the left", "the right"]]
-            all_nps.append(nps)
-
-        per_image = []
-        try:
-            for k, prompt in enumerate(tqdm(prompts, desc=f"    BLIP-VQA {subset}")):
-                nps = all_nps[k]
-                detail = {"prompt": prompt, "index": k, "noun_phrases": nps, "scores": []}
-                if not nps:
-                    per_image.append(detail)
-                    continue
-
-                img_path = os.path.join(images_dir, f"{prompt}_{k}.png")
-                if not os.path.exists(img_path):
-                    for j in range(min(len(nps), args.np_num)):
-                        reward[k, j] = 0.0
-                        detail["scores"].append({"np": nps[j], "score": 0.0, "note": "missing"})
-                    per_image.append(detail)
-                    continue
-
-                image = Image.open(img_path).convert("RGB")
-                for j, np_text in enumerate(nps[:args.np_num]):
-                    score = compute_vqa_yes_prob(model, processor, image, f"{np_text}?", device)
-                    reward[k, j] = score
-                    detail["scores"].append({"np": np_text, "score": round(score, 6)})
-                per_image.append(detail)
-
-            reward_final = reward[:, 0]
-            for i in range(1, args.np_num):
-                reward_final = reward_final * reward[:, i]
-            final_score = reward_final.mean().item()
-
-            for k in range(n):
-                per_image[k]["image_score"] = round(reward_final[k].item(), 6)
-
-            detail_path = os.path.join(args.output_dir, METHOD, subset, "vqa_detail.json")
-            os.makedirs(os.path.dirname(detail_path), exist_ok=True)
-            with open(detail_path, "w") as f:
-                json.dump({"blip_vqa_score": round(final_score, 6),
-                           "per_image": per_image}, f, indent=2, ensure_ascii=False)
-            log.info(f"    Detail saved → {detail_path}")
-
-            results[subset][METHOD] = round(final_score, 4)
-            log.info(f"  ➜ BLIP-VQA score = {final_score:.4f}")
-        except Exception:
-            log.error(f"  FAILED {METHOD}/{subset}:\n{traceback.format_exc()}")
-            results[subset][METHOD] = None
-
-        save_results(results, args.output_dir)
-
-    del model, processor
-    torch.cuda.empty_cache()
-    return results
-
-# ─────────────────────────────────────────────────────────
-#  Report
-# ─────────────────────────────────────────────────────────
-
-def print_geobind_scores(results):
-    subsets = [s for s in SUBSETS if s in results]
-    log.info("")
-    log.info("=" * 40)
-    log.info("  GeoBind  BLIP-VQA Scores")
-    log.info("=" * 40)
-    for s in subsets:
-        val = results.get(s, {}).get(METHOD)
-        score_str = f"{val:.4f}" if val is not None else "N/A"
-        log.info(f"  {s.capitalize():<12} {score_str}")
-    log.info("=" * 40)
+    log.info(f"All done. total generated={total_ok}, errors={total_err}")
 
 # ─────────────────────────────────────────────────────────
 #  CLI + main
 # ─────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GeoBind: generate + auto-evaluate")
+    p = argparse.ArgumentParser(description="GeoBind: generate images")
     p.add_argument("--output_dir", default="eval_results",
-                   help="Root output directory (images saved to <output_dir>/GeoBind/)")
+                   help="Root output directory (images → <output_dir>/GeoBind/<subset>/samples/)")
     p.add_argument("--subsets", nargs="+", default=SUBSETS)
     p.add_argument("--model_path", default="stabilityai/stable-diffusion-xl-base-1.0")
-    p.add_argument("--blip_model", default="Salesforce/blip-vqa-base")
     p.add_argument("--data_dir", default="data/t2i_compbench")
     p.add_argument("--n_inference_steps", type=int, default=50)
     p.add_argument("--seed", type=int, default=42)
-    p.add_argument("--np_num", type=int, default=8)
     p.add_argument("--guidance_scale", type=float, default=7.5)
-    p.add_argument("--skip_eval", action="store_true",
-                   help="Only generate, do not evaluate")
-    p.add_argument("--eval_only", action="store_true",
-                   help="Only evaluate (images must already exist)")
     return p.parse_args()
 
 
@@ -388,21 +221,17 @@ def main():
 
     log.info(f"Subsets: {args.subsets}")
     log.info(f"Output dir: {os.path.abspath(args.output_dir)}")
+    log.info("═══  Generating GeoBind images  ═══")
 
-    if not args.eval_only:
-        log.info("═══  Phase 1: Generate GeoBind images  ═══")
-        try:
-            generate_images(args)
-        except Exception:
-            log.error(f"Generation FAILED:\n{traceback.format_exc()}")
+    try:
+        generate_images(args)
+    except Exception:
+        log.error(f"Generation FAILED:\n{import_traceback()}")
 
-    if not args.skip_eval:
-        log.info("═══  Phase 2: BLIP-VQA Evaluation  ═══")
-        results = evaluate_images(args)
-        print_geobind_scores(results)
-        log.info(f"Results → {_results_path(args.output_dir)}")
-    else:
-        log.info("Evaluation skipped (--skip_eval).")
+
+def import_traceback():
+    import traceback
+    return traceback.format_exc()
 
 
 if __name__ == "__main__":
