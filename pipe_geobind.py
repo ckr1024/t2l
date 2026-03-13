@@ -314,7 +314,7 @@ class TokenMergerWithAttnHyperspace(nn.Module):
             prompt_embeds[:, noun_main_idx, :] = merged_sum_2
             if len(noun_indices) > 1:
                 prompt_embeds_hyper[:, noun_indices[1:], :] = 0
-                prompt_embeds[:, noun_main_idx[1:], :] = 0
+                prompt_embeds[:, noun_indices[1:], :] = 0
             prompt_embeds_hyper[:, attr_indices, :] = 0
             prompt_embeds[:, attr_indices, :] = 0
 
