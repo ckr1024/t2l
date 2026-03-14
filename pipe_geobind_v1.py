@@ -105,8 +105,10 @@ def contrastive_loss_hyperspace(
     for n_vec in other_anchors:
         dist_neg_list.append(hyperbolic_distance(query_vec, n_vec, c = 1))  
     dist_neg = torch.stack(dist_neg_list, dim=0) 
-    numerator = torch.exp(-dist_pos / temp)
-    denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0)
+    numerator = torch.exp(-dist_pos / temp) 
+    print(f'numerator is {numerator}')
+    denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0) 
+    print(f'denominator is {denominator}')
     loss_cont = -torch.log(numerator / (denominator + 1e-8) + 1e-8)  
     return loss_cont.mean()  
 
@@ -405,50 +407,10 @@ def retrieve_timesteps(
     return timesteps, num_inference_steps
 
 
-class geobindPipeline(StableDiffusionXLPipeline):
+class geobindV1Pipeline(StableDiffusionXLPipeline):
     r"""
-    Pipeline for text-to-image generation using Stable Diffusion XL.
-
-    This model inherits from [`DiffusionPipeline`]. Check the superclass documentation for the generic methods the
-    library implements for all the pipelines (such as downloading or saving, running on a particular device, etc.)
-
-    The pipeline also inherits the following loading methods:
-        - [`~loaders.TextualInversionLoaderMixin.load_textual_inversion`] for loading textual inversion embeddings
-        - [`~loaders.FromSingleFileMixin.from_single_file`] for loading `.ckpt` files
-        - [`~loaders.StableDiffusionXLLoraLoaderMixin.load_lora_weights`] for loading LoRA weights
-        - [`~loaders.StableDiffusionXLLoraLoaderMixin.save_lora_weights`] for saving LoRA weights
-        - [`~loaders.IPAdapterMixin.load_ip_adapter`] for loading IP Adapters
-
-    Args:
-        vae ([`AutoencoderKL`]):
-            Variational Auto-Encoder (VAE) Model to encode and decode images to and from latent representations.
-        text_encoder ([`CLIPTextModel`]):
-            Frozen text-encoder. Stable Diffusion XL uses the text portion of
-            [CLIP], specifically
-            the [clip-vit-large-patch14]variant.
-        text_encoder_2 ([` CLIPTextModelWithProjection`]):
-            Second frozen text-encoder. Stable Diffusion XL uses the text and pool portion of
-            [CLIP],
-            specifically the
-            [laion/CLIP-ViT-bigG-14-laion2B-39B-b160k]
-            variant.
-        tokenizer (`CLIPTokenizer`):
-            Tokenizer of class
-            [CLIPTokenizer].
-        tokenizer_2 (`CLIPTokenizer`):
-            Second Tokenizer of class
-            [CLIPTokenizer].
-        unet ([`UNet2DConditionModel`]): Conditional U-Net architecture to denoise the encoded image latents.
-        scheduler ([`SchedulerMixin`]):
-            A scheduler to be used in combination with `unet` to denoise the encoded image latents. Can be one of
-            [`DDIMScheduler`], [`LMSDiscreteScheduler`], or [`PNDMScheduler`].
-        force_zeros_for_empty_prompt (`bool`, *optional*, defaults to `"True"`):
-            Whether the negative prompt embeddings shall be forced to always be set to 0. Also see the config of
-            `stabilityai/stable-diffusion-xl-base-1-0`.
-        add_watermarker (`bool`, *optional*):
-            Whether to use the [invisible_watermark library] to
-            watermark output images. If not defined, it will default to True if the package is installed, otherwise no
-            watermarker will be used.
+    Faithful reproduction of pipe_geobind v1.py with only float64 and
+    noun_indices bug fixes applied.
     """
 
     model_cpu_offload_seq = "text_encoder->text_encoder_2->image_encoder->unet->vae"
@@ -632,35 +594,17 @@ class geobindPipeline(StableDiffusionXLPipeline):
         stoken = stoken - grad_cond
         return stoken
 
-    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor,
-                  use_our_method: bool, other_anchors, iter_num=3,
-                  temperature=0.07,
-                  lambda_mse=1.0, lambda_cont=1e-6, lambda_reg=0.8,
-                  step_size=10000):
+    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor, use_our_method: bool, other_anchors, iter_num=3, temperature=0.07, lambda_mse=1.0, lambda_cont=1e-6):
         """
-        Semantic binding optimisation with regularisation to preserve noun
-        semantics.
-
-        lambda_mse  — weight for the language (noise-matching) loss
-        lambda_cont — weight for the hyperbolic contrastive loss
-        lambda_reg  — weight for the drift regularisation (keeps stoken
-                      close to its original value so noun semantics survive)
-        step_size   — gradient-descent learning rate
+        latents: 128 128 4
+        stoken: dim
+        prompt_anchor: 77 dim
         """
         stoken.requires_grad_(True)
-        stoken_orig = stoken.detach().clone()
-
-        with torch.no_grad():
-            pos_idx = 1 if prompt_anchor.ndim >= 3 and prompt_anchor.shape[0] == 2 else 0
-            target_repr = prompt_anchor[pos_idx].mean(dim=0)
-            other_reprs = [
-                oa[pos_idx].mean(dim=0) if (oa.ndim >= 3 and oa.shape[0] == 2) else oa.mean(dim=0)
-                for oa in other_anchors
-            ]
 
         latents = latents.clone().detach().unsqueeze(0)
         iteration = 0
-
+     
         with torch.no_grad():
             noise_pred_anchor = self.unet(
                 latents,
@@ -680,25 +624,29 @@ class geobindPipeline(StableDiffusionXLPipeline):
                 cross_attention_kwargs=self.cross_attention_kwargs,
                 added_cond_kwargs=self.added_cond_kwargs2,
             ).sample
-
+        
             loss_mse = torch.nn.functional.mse_loss(noise_pred_token, noise_pred_anchor)
-            loss_reg = torch.nn.functional.mse_loss(stoken, stoken_orig)
-
+            use_our_method = True
+            # ---------------------------------双曲空间中的对比学习
             if use_our_method:
                 loss_cont = contrastive_loss_hyperspace(
-                    stoken,
-                    target_repr,
-                    other_reprs,
-                    temp=temperature,
-                )
-                total_loss = (lambda_mse * loss_mse
-                              + lambda_cont * loss_cont
-                              + lambda_reg * loss_reg)
+                     stoken,
+                     prompt_anchor,
+                     other_anchors,
+                     temp=temperature
+                 )
+                print(f'loss_mse loss is {loss_mse}')
+                print(f'loss_cont loss is {loss_cont}')
+                total_loss = lambda_mse * loss_mse + lambda_cont * loss_cont
+                print(f'total_loss is {total_loss}')
             else:
-                total_loss = lambda_mse * loss_mse + lambda_reg * loss_reg
+                total_loss = loss_mse
 
-            stoken = self._update_stoken(stoken, total_loss, step_size)
+            stoken = self._update_stoken(stoken, total_loss, 10000)
             if iteration >= iter_num:
+                print(
+                    f"Semantic binding loss optimization Exceeded max number of iterations ({iter_num}) "
+                )
                 break
 
         with torch.no_grad():
@@ -917,17 +865,15 @@ class geobindPipeline(StableDiffusionXLPipeline):
             clip_skip=self.clip_skip,
         )
 
+        # stoken1, stoken2 = prompt_embeds[0,2], prompt_embeds[0,6]
         # -----------------------------------
         # token merge
         use_our_method = True
         if use_our_method:
-            hyper_merger = kwargs.get("hyper_merger", None)
-            if hyper_merger is None:
-                hyper_merger = TokenMergerWithAttnHyperspace(
-                    embed_dim=2048, num_heads=8, max_length=128
-                ).to(device)
+            merger = TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8, max_length=128)
             if not run_standard_sd and token_refinement_steps:
-                prompt_embeds[0] = hyper_merger(prompt_embeds[0], indices_to_alter)
+                print(f'prompt_embeds shape is {prompt_embeds.shape}')
+                prompt_embeds[0] = merger(prompt_embeds[0], indices_to_alter)
         else:
             if not run_standard_sd and token_refinement_steps:
                 prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
@@ -1094,12 +1040,12 @@ class geobindPipeline(StableDiffusionXLPipeline):
                         token_control, attention_control = tome_control_steps
                         # EOT replace
                         if i == eot_replace_step:
-                            prompt_embeds2[1, prompt_length + 1 :] = prompt_anchor3[0][
+                            prompt_embeds[1, prompt_length + 1 :] = prompt_anchor3[0][
                                 prompt_length + 1 :]
                         if i < token_control:
                             for idx, panchor in enumerate(panchors):
                                 stoken = (
-                                    prompt_embeds2[1, indices_to_alter[idx][0][0]]
+                                    prompt_embeds[1, indices_to_alter[idx][0][0]]
                                     .detach()
                                     .clone()
                                 )
@@ -1113,7 +1059,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                     other_panchors,
                                     token_refinement_steps,
                                 )
-                                prompt_embeds2[1, indices_to_alter[idx][0][0]] = stoken
+                                prompt_embeds[1, indices_to_alter[idx][0][0]] = stoken
                         # entropy loss for attention refinement
                         if i < attention_control:
                             latents_up, loss, prompt_embeds2 = (
@@ -1121,7 +1067,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                     latents=latents_up,
                                     indices_to_alter=indices_to_alter,
                                     threshold=thresholds[i],
-                                    text_embeddings=prompt_embeds2,
+                                    text_embeddings=prompt_embeds,
                                     attention_store=attention_store,
                                     step_size=scale_factor * scale_range[i],
                                     t=t,

@@ -126,7 +126,7 @@ def parse_args():
     p.add_argument("--output_dir", default="eval_results")
     p.add_argument("--data_dir", default="data/t2i_compbench")
     p.add_argument("--n_inference_steps", type=int, default=50)
-    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--seed", type=int, default=43)
     p.add_argument("--np_num", type=int, default=8,
                    help="Max noun-phrase slots (>= actual NP count in any prompt)")
     p.add_argument("--guidance_scale", type=float, default=7.5)
@@ -264,7 +264,10 @@ def generate_all_images(args):
     log.info("Loading spaCy + PromptParser …")
     nlp = spacy.load("en_core_web_trf")
     prompt_parser = PromptParser(args.model_path)
-    thresholds = {i: max(26 - i * 0.5, 21) for i in range(20)}
+    thresholds = {
+        0: 26, 1: 25, 2: 24, 3: 23, 4: 22.5,
+        5: 22, 6: 21.5, 7: 21, 8: 21, 9: 21,
+    }
 
     # Group requested methods by which pipeline they need
     pipe_groups = {}

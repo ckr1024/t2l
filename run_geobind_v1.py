@@ -1,17 +1,14 @@
 #!/usr/bin/env python
 """
-GeoBind (Improved) — Image Generation
-======================================
-Generate images using the improved GeoBind pipeline (pipe_geobind.py) on
-T2I-CompBench attribute-binding subsets.
-
-Based on run_geobind_v1.py with identical base parameters; only the pipeline
-import differs (pipe_geobind.geobindPipeline with improvements).
+GeoBind v1 Baseline — Image Generation
+=======================================
+Generate images using the faithful v1 GeoBind pipeline (no improvements)
+for baseline comparison.
 
 Usage
 -----
-    python run_geobind.py
-    python run_geobind.py --output_dir eval_results --subsets color texture
+    python run_geobind_v1.py
+    python run_geobind_v1.py --output_dir eval_results --subsets color texture
 """
 
 import os
@@ -26,12 +23,12 @@ import spacy
 from PIL import Image
 from tqdm import tqdm
 
-from pipe_geobind import geobindPipeline, TokenMergerWithAttnHyperspace
+from pipe_geobind_v1 import geobindV1Pipeline, TokenMergerWithAttnHyperspace
 from utils.ptp_utils import AttentionStore, register_attention_control
 from prompt_utils import PromptParser
 
 SUBSETS = ["color", "shape", "texture"]
-METHOD = "GeoBind"
+METHOD = "GeoBind_v1"
 
 # ─────────────────────────────────────────────────────────
 #  Logging
@@ -40,7 +37,7 @@ METHOD = "GeoBind"
 def setup_logging(output_dir):
     os.makedirs(output_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = os.path.join(output_dir, f"geobind_log_{ts}.txt")
+    log_path = os.path.join(output_dir, f"geobind_v1_log_{ts}.txt")
 
     fmt = logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S")
     fh = logging.FileHandler(log_path, encoding="utf-8")
@@ -48,7 +45,7 @@ def setup_logging(output_dir):
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
 
-    logger = logging.getLogger("geobind")
+    logger = logging.getLogger("geobind_v1")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     logger.addHandler(fh)
@@ -56,7 +53,7 @@ def setup_logging(output_dir):
     logger.info(f"Logging to {log_path}")
     return logger
 
-log = logging.getLogger("geobind")
+log = logging.getLogger("geobind_v1")
 
 # ─────────────────────────────────────────────────────────
 #  Data & prompt parsing
@@ -106,24 +103,19 @@ def parse_prompt(prompt, nlp, prompt_parser, tokenizer):
     return filtered_idx, filtered_anchor, merged, prompt_length
 
 # ─────────────────────────────────────────────────────────
-#  Image generation  (same base params as v1)
+#  Image generation  (v1 parameters)
 # ─────────────────────────────────────────────────────────
 
 def generate_images(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    log.info("Loading GeoBind (improved) pipeline …")
-    pipeline = geobindPipeline.from_pretrained(
+    log.info("Loading GeoBind v1 pipeline …")
+    pipeline = geobindV1Pipeline.from_pretrained(
         args.model_path, torch_dtype=torch.float16, variant="fp16",
         safety_checker=None,
     ).to(device)
     pipeline.unet.requires_grad_(False)
     pipeline.vae.requires_grad_(False)
-
-    hyper_merger = (
-        TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8)
-        .to(device).eval()
-    )
 
     log.info("Loading spaCy + PromptParser …")
     nlp = spacy.load("en_core_web_trf")
@@ -186,7 +178,6 @@ def generate_images(args):
                     eot_replace_step=60,
                     use_pose_loss=False,
                     negative_prompt="low res, ugly, blurry, artifact, unreal",
-                    hyper_merger=hyper_merger,
                 )
                 out.images[0].save(img_path)
                 n_ok += 1
@@ -209,7 +200,7 @@ def generate_images(args):
 # ─────────────────────────────────────────────────────────
 
 def parse_args():
-    p = argparse.ArgumentParser(description="GeoBind (improved): generate images")
+    p = argparse.ArgumentParser(description="GeoBind v1 baseline: generate images")
     p.add_argument("--output_dir", default="eval_results")
     p.add_argument("--subsets", nargs="+", default=SUBSETS)
     p.add_argument("--model_path", default="stabilityai/stable-diffusion-xl-base-1.0")
@@ -226,7 +217,7 @@ def main():
 
     log.info(f"Subsets: {args.subsets}")
     log.info(f"Output dir: {os.path.abspath(args.output_dir)}")
-    log.info("═══  Generating GeoBind (improved) images  ═══")
+    log.info("═══  Generating GeoBind v1 baseline images  ═══")
 
     try:
         generate_images(args)
