@@ -246,20 +246,30 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         embed_dim: int = 2048,
         num_heads: int = 8,
         max_length: int = 128,
-        c: float = 1.0  # 曲率参数
+        c: float = 1.0,
+        hyper_weight: float = 0.15,
     ):
         super().__init__()
         self.c = c
+        self.embed_dim = embed_dim
+        self.hyper_weight = hyper_weight
         self.pos_encoding = SinusoidalPositionalEncoding(embed_dim, max_length)
-        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
 
         self.alpha = 1.1
         self.beta = 1.2
 
+    @staticmethod
+    def _cross_attn(query, key, value):
+        """Parameter-free scaled dot-product cross-attention."""
+        d = query.shape[-1]
+        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d)
+        weights = F.softmax(scores, dim=-1)
+        return torch.matmul(weights, value)
+
     def forward(self, prompt_embeds: torch.Tensor, idx_merge: list[list[list[int]]]):
-        device = self.multihead_attn.in_proj_weight.device  # Ensure compatibility with model weights
-        dtype = self.multihead_attn.in_proj_weight.dtype
-        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype).unsqueeze(0)  # => (1, seq_len, embed_dim)
+        device = prompt_embeds.device
+        dtype = prompt_embeds.dtype
+        prompt_embeds = prompt_embeds.unsqueeze(0)  # => (1, seq_len, embed_dim)
 
         batch_size, seq_len, embed_dim = prompt_embeds.size()
         pos = torch.arange(seq_len, device=device, dtype=torch.int)
@@ -285,18 +295,8 @@ class TokenMergerWithAttnHyperspace(nn.Module):
             attr_vectors = prompt_embeds_hyper[:, attr_indices, :] 
             noun_vectors_2 = prompt_embeds[:, noun_indices, :] 
             attr_vectors_2 = prompt_embeds[:, attr_indices, :] 
-            attn_output_2, _ = self.multihead_attn(
-                query=noun_vectors_2,  
-                key=attr_vectors_2,    
-                value=attr_vectors_2,  
-            )
-
-
-            attn_output, _ = self.multihead_attn(
-                query=noun_vectors,  
-                key=attr_vectors,    
-                value=attr_vectors,  
-            )
+            attn_output_2 = self._cross_attn(noun_vectors_2, attr_vectors_2, attr_vectors_2)
+            attn_output = self._cross_attn(noun_vectors, attr_vectors, attr_vectors)
           
             merged_vector = mobius_addition(attn_output,noun_vectors)
             merged_vector_2 = attn_output_2 + noun_vectors_2
@@ -320,7 +320,7 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         prompt_embeds_hyper = prompt_embeds_hyper.squeeze(0)
         prompt_embeds = prompt_embeds.squeeze(0)
         # --------------------双曲空间 & 欧式空间的token embedding的加权和--------------------
-        return prompt_embeds + 0.1 * prompt_embeds_hyper
+        return prompt_embeds + self.hyper_weight * prompt_embeds_hyper
 
 
 def get_centroid(attn_map: torch.Tensor) -> torch.Tensor:
@@ -629,14 +629,17 @@ class geobindPipeline(StableDiffusionXLPipeline):
         """Update the merged token according to the computed loss."""
         loss = loss * step_size
         grad_cond = torch.autograd.grad(loss.requires_grad_(True), [stoken])[0]
+        grad_norm = grad_cond.norm()
+        if grad_norm > 1.0:
+            grad_cond = grad_cond / grad_norm
         stoken = stoken - grad_cond
         return stoken
 
     def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor,
                   use_our_method: bool, other_anchors, iter_num=3,
                   temperature=0.07,
-                  lambda_mse=1.0, lambda_cont=1e-6, lambda_reg=0.8,
-                  step_size=10000):
+                  lambda_mse=1.0, lambda_cont=0.01, lambda_reg=0.15,
+                  step_size=5000):
         """
         Semantic binding optimisation with regularisation to preserve noun
         semantics.

@@ -174,8 +174,8 @@ def generate_images(args):
                     prompt_length=pl,
                     token_refinement_steps=3,
                     attention_refinement_steps=[4, 4],
-                    tome_control_steps=[5, 5],
-                    eot_replace_step=60,
+                    tome_control_steps=[5, 10],
+                    eot_replace_step=40,
                     use_pose_loss=False,
                     negative_prompt="low res, ugly, blurry, artifact, unreal",
                 )
