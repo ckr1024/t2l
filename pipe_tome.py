@@ -32,10 +32,7 @@ logger = logging.get_logger(__name__)
 
 
 def token_merge(
-    prompt_embeds: torch.Tensor,
-    idx_merge: List[List[int]],
-    noun_weight: float = 1.1,
-    attr_weight: float = 1.2,
+    prompt_embeds: torch.Tensor, idx_merge: List[List[int]]
 ) -> torch.Tensor:
     """
     prompt_embeds: 77 dim
@@ -44,9 +41,10 @@ def token_merge(
 
     for idxs in idx_merge:
         noun_idx = idxs[0][0]
-        prompt_embeds[noun_idx] = noun_weight * prompt_embeds[idxs[0]].sum(
+        alpha = 1.1
+        prompt_embeds[noun_idx] = alpha * prompt_embeds[idxs[0]].sum(
             dim=0
-        ) + attr_weight * prompt_embeds[idxs[1]].sum(dim=0)
+        ) + 1.2 * prompt_embeds[idxs[1]].sum(dim=0)
         if len(idxs[0]) > 1:
             prompt_embeds[idxs[0][1:]] = 0
         prompt_embeds[idxs[1]] = 0
@@ -584,8 +582,6 @@ class tomePipeline(StableDiffusionXLPipeline):
         use_pose_loss = kwargs.get("use_pose_loss")
         use_hyperbolic = kwargs.get("use_hyperbolic", False)
         hyper_merger = kwargs.get("hyper_merger", None)
-        merge_noun_weight = kwargs.get("merge_noun_weight", 1.1)
-        merge_attr_weight = kwargs.get("merge_attr_weight", 1.2)
 
         # 0. Default height and width to unet
         height = height or self.default_sample_size * self.vae_scale_factor
@@ -710,11 +706,7 @@ class tomePipeline(StableDiffusionXLPipeline):
             if use_hyperbolic and hyper_merger is not None:
                 prompt_embeds[0] = hyper_merger(prompt_embeds[0], indices_to_alter)
             else:
-                prompt_embeds[0] = token_merge(
-                    prompt_embeds[0], indices_to_alter,
-                    noun_weight=merge_noun_weight,
-                    attr_weight=merge_attr_weight,
-                )
+                prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
 
         # 4. Prepare timesteps
         timesteps, num_inference_steps = retrieve_timesteps(
