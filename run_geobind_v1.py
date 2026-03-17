@@ -122,7 +122,7 @@ def generate_images(args):
     prompt_parser = PromptParser(args.model_path)
     thresholds = {
         0: 26, 1: 25, 2: 24, 3: 23, 4: 22.5,
-        5: 22, 6: 21.5, 7: 21, 8: 21, 9: 21,
+        5: 22, 6: 21.5, 7: 20, 8: 20, 9: 20,
     }
 
     total_ok, total_err = 0, 0
@@ -172,10 +172,10 @@ def generate_images(args):
                     scale_range=(1.0, 0.0),
                     prompt3=merged,
                     prompt_length=pl,
-                    token_refinement_steps=3,
-                    attention_refinement_steps=[4, 4],
-                    tome_control_steps=[5, 10],
-                    eot_replace_step=40,
+                    token_refinement_steps=4,
+                    attention_refinement_steps=[5, 4],
+                    tome_control_steps=[10, 10],
+                    eot_replace_step=35,
                     use_pose_loss=False,
                     negative_prompt="low res, ugly, blurry, artifact, unreal",
                 )

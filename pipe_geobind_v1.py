@@ -867,15 +867,23 @@ class geobindV1Pipeline(StableDiffusionXLPipeline):
 
         # stoken1, stoken2 = prompt_embeds[0,2], prompt_embeds[0,6]
         # -----------------------------------
-        # token merge
+        # token merge (v1 default; optionally allow external merger injection)
+        #
+        # NOTE: By default this is identical to the original v1 behavior.
+        # Experiments can pass a callable via `kwargs["token_merger"]` to override
+        # the merge behavior without changing the rest of the pipeline.
+        token_merger = kwargs.get("token_merger", None)
         use_our_method = True
-        if use_our_method:
-            merger = TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8, max_length=128)
-            if not run_standard_sd and token_refinement_steps:
-                print(f'prompt_embeds shape is {prompt_embeds.shape}')
+        if not run_standard_sd and token_refinement_steps:
+            if token_merger is not None:
+                prompt_embeds[0] = token_merger(prompt_embeds[0], indices_to_alter)
+            elif use_our_method:
+                merger = TokenMergerWithAttnHyperspace(
+                    embed_dim=2048, num_heads=8, max_length=128
+                )
+                print(f"prompt_embeds shape is {prompt_embeds.shape}")
                 prompt_embeds[0] = merger(prompt_embeds[0], indices_to_alter)
-        else:
-            if not run_standard_sd and token_refinement_steps:
+            else:
                 prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
 
         # 4. Prepare timesteps

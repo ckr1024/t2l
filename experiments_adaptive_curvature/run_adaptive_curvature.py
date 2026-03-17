@@ -6,8 +6,7 @@ Compares fixed-curvature GeoBind against adaptive-curvature variants
 on the T2I-CompBench benchmark (color, shape, texture).
 
 Methods tested:
-  - ToMe           : Euclidean baseline (from run_compbench_eval_v2.py)
-  - GeoBind_fixed  : Hyperbolic with fixed c=1.0
+  - GeoBind_fixed  : GeoBind v1 pipeline with fixed curvature (baseline)
   - GeoBind_adaptive_prompt : Per-prompt adaptive curvature
   - GeoBind_adaptive_entity : Per-entity adaptive curvature
 
@@ -34,9 +33,8 @@ from tqdm import tqdm
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from pipe_tome import tomePipeline, token_merge
+from pipe_geobind_v1 import geobindV1Pipeline
 from utils.ptp_utils import AttentionStore, register_attention_control
-from utils.hyperbolic_utils import token_merge_hyperbolic
 from prompt_utils import PromptParser
 from transformers import BlipProcessor, BlipForQuestionAnswering
 
@@ -48,7 +46,6 @@ from experiments_adaptive_curvature.adaptive_curvature_utils import (
 
 SUBSETS = ["color", "shape", "texture"]
 METHODS = [
-    "ToMe",
     "GeoBind_fixed",
     "GeoBind_adaptive_prompt",
     "GeoBind_adaptive_entity",
@@ -140,6 +137,58 @@ def parse_prompt_for_tome(prompt, nlp, prompt_parser, tokenizer):
 
 
 # ═══════════════════════════════════════════════════════════════
+#  Adaptive curvature (gentle)
+# ═══════════════════════════════════════════════════════════════
+
+def _gentle_curvature(
+    raw_c: float,
+    *,
+    base: float = 1.0,
+    min_c: float = 0.6,
+    max_c: float = 1.4,
+    strength: float = 0.25,
+) -> float:
+    """Make curvature adaptation non-aggressive.
+
+    We clamp raw estimates to a narrow range around `base` and then lerp
+    towards base using `strength` (smaller => gentler).
+    """
+    if raw_c is None:
+        return base
+    try:
+        c = float(raw_c)
+    except Exception:
+        return base
+    c = max(min_c, min(max_c, c))
+    return base + strength * (c - base)
+
+
+def _make_token_merger_for_method(method: str, doc, token_indices, args):
+    """Return callable(prompt_embeds, idx_merge) -> prompt_embeds or None."""
+    if method == "GeoBind_fixed":
+        # fixed curvature: keep it as 1.0 (baseline)
+        curvatures = None
+    elif method == "GeoBind_adaptive_prompt" and doc is not None:
+        raw = estimate_prompt_curvature(doc)
+        c = _gentle_curvature(raw)
+        curvatures = [c for _ in range(len(token_indices))]
+    elif method == "GeoBind_adaptive_entity" and doc is not None and token_indices:
+        raws = estimate_entity_curvatures(doc, token_indices)
+        curvatures = [_gentle_curvature(r) for r in raws]
+    else:
+        curvatures = None
+
+    if curvatures is None:
+        return None
+
+    def _merger(prompt_embeds, idx_merge):
+        # token_merge_adaptive mutates prompt_embeds in-place; keep consistent with pipeline behavior.
+        return token_merge_adaptive(prompt_embeds, idx_merge, curvatures)
+
+    return _merger
+
+
+# ═══════════════════════════════════════════════════════════════
 #  Image generation
 # ═══════════════════════════════════════════════════════════════
 
@@ -147,7 +196,7 @@ def generate_all_images(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
     log.info("Loading pipeline …")
-    pipeline = tomePipeline.from_pretrained(
+    pipeline = geobindV1Pipeline.from_pretrained(
         args.model_path, torch_dtype=torch.float16, variant="fp16",
         safety_checker=None,
     ).to(device)
@@ -159,7 +208,7 @@ def generate_all_images(args):
     prompt_parser = PromptParser(args.model_path)
     thresholds = {
         0: 26, 1: 25, 2: 24, 3: 23, 4: 22.5,
-        5: 22, 6: 21.5, 7: 20.5, 8: 20.5, 9: 20.5,
+        5: 22, 6: 21.5, 7: 20, 8: 20, 9: 20,
     }
 
     for subset in args.subsets:
@@ -191,74 +240,36 @@ def generate_all_images(args):
                 except Exception:
                     ti, pa, merged, pl, doc = [], [], prompt, 0, None
 
-                run_std = (method == "SDXL") or (not ti)
-
-                use_hyp = method != "ToMe"
-                if method == "GeoBind_fixed":
-                    curvature = args.fixed_curvature
-                elif method == "GeoBind_adaptive_prompt" and doc is not None:
-                    curvature = estimate_prompt_curvature(doc)
-                elif method == "GeoBind_adaptive_entity":
-                    curvature = 1.0  # per-entity handled separately below
-                else:
-                    curvature = 1.0
+                run_std = not ti
 
                 controller = AttentionStore()
                 register_attention_control(pipeline, controller)
 
                 try:
-                    if method == "GeoBind_adaptive_entity" and ti and doc is not None:
-                        entity_curvatures = estimate_entity_curvatures(doc, ti)
-                        # Manually merge tokens before calling pipeline
-                        kw = dict(
-                            prompt=prompt,
-                            guidance_scale=args.guidance_scale,
-                            generator=g,
-                            num_inference_steps=args.n_inference_steps,
-                            attention_store=controller,
-                            indices_to_alter=ti,
-                            prompt_anchor=pa,
-                            attention_res=32,
-                            run_standard_sd=run_std,
-                            thresholds=thresholds,
-                            scale_factor=3,
-                            scale_range=(1.0, 0.0),
-                            prompt3=merged,
-                            prompt_length=pl,
-                            token_refinement_steps=4,
-                            attention_refinement_steps=[5, 4],
-                            tome_control_steps=[10, 10],
-                            eot_replace_step=30,
-                            use_pose_loss=False,
-                            use_hyperbolic=True,
-                            hyperbolic_curvature=entity_curvatures[0] if entity_curvatures else 1.0,
-                            negative_prompt="low res, ugly, blurry, artifact, unreal",
-                        )
-                    else:
-                        kw = dict(
-                            prompt=prompt,
-                            guidance_scale=args.guidance_scale,
-                            generator=g,
-                            num_inference_steps=args.n_inference_steps,
-                            attention_store=controller,
-                            indices_to_alter=ti,
-                            prompt_anchor=pa,
-                            attention_res=32,
-                            run_standard_sd=run_std,
-                            thresholds=thresholds,
-                            scale_factor=3,
-                            scale_range=(1.0, 0.0),
-                            prompt3=merged,
-                            prompt_length=pl,
-                            token_refinement_steps=4,
-                            attention_refinement_steps=[5, 4],
-                            tome_control_steps=[10, 10],
-                            eot_replace_step=30,
-                            use_pose_loss=False,
-                            use_hyperbolic=use_hyp,
-                            hyperbolic_curvature=curvature,
-                            negative_prompt="low res, ugly, blurry, artifact, unreal",
-                        )
+                    token_merger = _make_token_merger_for_method(method, doc, ti, args)
+                    kw = dict(
+                        prompt=prompt,
+                        guidance_scale=args.guidance_scale,
+                        generator=g,
+                        num_inference_steps=args.n_inference_steps,
+                        attention_store=controller,
+                        indices_to_alter=ti,
+                        prompt_anchor=pa,
+                        attention_res=32,
+                        run_standard_sd=run_std,
+                        thresholds=thresholds,
+                        scale_factor=3,
+                        scale_range=(1.0, 0.0),
+                        prompt3=merged,
+                        prompt_length=pl,
+                        token_refinement_steps=4,
+                        attention_refinement_steps=[5, 4],
+                        tome_control_steps=[10, 10],
+                        eot_replace_step=35,
+                        use_pose_loss=False,
+                        negative_prompt="low res, ugly, blurry, artifact, unreal",
+                        token_merger=token_merger,
+                    )
 
                     out = pipeline(**kw)
                     out.images[0].save(img_path)
