@@ -14,6 +14,7 @@ Usage
 import os
 import sys
 import argparse
+import traceback
 
 import torch
 import numpy as np
@@ -156,6 +157,9 @@ def main():
     print("Loading AudioLDM2 pipeline …")
     try:
         from diffusers import AudioLDM2Pipeline
+        import diffusers
+        import transformers
+        print(f"Versions: torch={torch.__version__} diffusers={diffusers.__version__} transformers={transformers.__version__}")
         cache_dir = args.cache_dir or os.path.join(args.output_dir, ".hf_cache")
         pipe = AudioLDM2Pipeline.from_pretrained(
             args.model_id, torch_dtype=torch.float16,
@@ -220,6 +224,7 @@ def main():
 
             except Exception as e:
                 print(f"    [ERROR] {e}")
+                print(traceback.format_exc())
 
     del pipe
     torch.cuda.empty_cache()
