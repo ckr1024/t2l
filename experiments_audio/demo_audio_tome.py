@@ -31,11 +31,43 @@ def _ensure_tensor_from_model_output(x):
     # transformers ModelOutput is tuple-like and supports .to_tuple()
     if isinstance(x, torch.Tensor):
         return x
-    for attr in ("text_embeds", "last_hidden_state", "embeddings"):
+    # Prefer CLAP's projected text embedding (usually 2D, dim=512)
+    for attr in ("text_embeds", "text_features", "pooler_output", "sentence_embedding"):
         if hasattr(x, attr):
             v = getattr(x, attr)
             if isinstance(v, torch.Tensor):
                 return v
+
+    # If it's a ModelOutput (dict-like), pick the most likely embedding tensor.
+    try:
+        items = list(x.items()) if hasattr(x, "items") else []
+    except Exception:
+        items = []
+
+    tensor_fields = []
+    for _, v in items:
+        if isinstance(v, torch.Tensor):
+            tensor_fields.append(v)
+
+    # Heuristic: prefer 2D tensors, and especially those with last dim 512 (CLAP).
+    for target_dim in (512, 768):
+        for v in tensor_fields:
+            if v.dim() == 2 and v.shape[-1] == target_dim:
+                return v
+    for v in tensor_fields:
+        if v.dim() == 2:
+            return v
+
+    # Fall back to last_hidden_state only if nothing else fits.
+    for attr in ("last_hidden_state", "embeddings"):
+        if hasattr(x, attr):
+            v = getattr(x, attr)
+            if isinstance(v, torch.Tensor):
+                # Avoid returning a 3D hidden state when a pooled vector is expected.
+                if v.dim() == 3:
+                    v = v[:, 0, :]
+                return v
+
     if isinstance(x, (tuple, list)) and len(x) > 0 and isinstance(x[0], torch.Tensor):
         return x[0]
     if hasattr(x, "to_tuple"):
