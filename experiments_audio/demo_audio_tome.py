@@ -21,9 +21,9 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from experiments_audio.audio_tome_utils import (
-    token_merge_audio,
     parse_audio_prompt,
 )
+from experiments_audio.run_audio_tome import apply_tome_to_audio_embeds
 
 
 DEMO_PROMPTS = [
@@ -92,16 +92,29 @@ def main():
             g = torch.Generator(device).manual_seed(args.seed)
 
             try:
-                # AudioLDM2 always uses text directly; token merging happens
-                # at the embedding level inside the pipeline.
-                # For this demo, we generate baseline and compare.
-                output = pipe(
-                    prompt=prompt,
-                    audio_length_in_s=args.audio_length,
-                    num_inference_steps=args.n_inference_steps,
-                    guidance_scale=3.5,
-                    generator=g,
-                )
+                if use_tome and idx_merge:
+                    prompt_embeds = apply_tome_to_audio_embeds(
+                        pipe,
+                        prompt,
+                        idx_merge,
+                        use_hyperbolic=use_hyp,
+                        curvature=1.0,
+                    )
+                    output = pipe(
+                        prompt_embeds=prompt_embeds,
+                        audio_length_in_s=args.audio_length,
+                        num_inference_steps=args.n_inference_steps,
+                        guidance_scale=3.5,
+                        generator=g,
+                    )
+                else:
+                    output = pipe(
+                        prompt=prompt,
+                        audio_length_in_s=args.audio_length,
+                        num_inference_steps=args.n_inference_steps,
+                        guidance_scale=3.5,
+                        generator=g,
+                    )
 
                 audio = output.audios[0]
                 audio_path = os.path.join(prompt_dir, f"{label}.wav")
