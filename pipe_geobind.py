@@ -248,8 +248,6 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         max_length: int = 128,
         c: float = 1.0,
         hyper_weight: float = 0.15,
-        alpha: float = 1.0,
-        beta: float = 1.0,
     ):
         super().__init__()
         self.c = c
@@ -257,8 +255,8 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         self.hyper_weight = hyper_weight
         self.pos_encoding = SinusoidalPositionalEncoding(embed_dim, max_length)
 
-        self.alpha = alpha
-        self.beta = beta
+        self.alpha = 1.1
+        self.beta = 1.2
 
     @staticmethod
     def _cross_attn(query, key, value):
@@ -631,22 +629,23 @@ class geobindPipeline(StableDiffusionXLPipeline):
         """Update the merged token according to the computed loss."""
         loss = loss * step_size
         grad_cond = torch.autograd.grad(loss.requires_grad_(True), [stoken])[0]
-        if torch.isnan(grad_cond).any() or torch.isinf(grad_cond).any():
-            return stoken
+        grad_norm = grad_cond.norm()
+        if grad_norm > 1.0:
+            grad_cond = grad_cond / grad_norm
         stoken = stoken - grad_cond
         return stoken
 
     def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor,
                   use_our_method: bool, other_anchors, iter_num=3,
                   temperature=0.07,
-                  lambda_mse=1.0, lambda_cont=0.01, lambda_reg=0.1,
-                  step_size=10000):
+                  lambda_mse=1.0, lambda_cont=0.01, lambda_reg=0.15,
+                  step_size=5000):
         """
         Semantic binding optimisation with regularisation to preserve noun
         semantics.
 
         lambda_mse  — weight for the language (noise-matching) loss
-        lambda_cont — weight for the cosine contrastive loss
+        lambda_cont — weight for the hyperbolic contrastive loss
         lambda_reg  — weight for the drift regularisation (keeps stoken
                       close to its original value so noun semantics survive)
         step_size   — gradient-descent learning rate
@@ -689,7 +688,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
             loss_reg = torch.nn.functional.mse_loss(stoken, stoken_orig)
 
             if use_our_method:
-                loss_cont = contrastive_loss(
+                loss_cont = contrastive_loss_hyperspace(
                     stoken,
                     target_repr,
                     other_reprs,

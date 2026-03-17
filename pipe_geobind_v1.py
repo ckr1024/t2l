@@ -248,17 +248,15 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         embed_dim: int = 2048,
         num_heads: int = 8,
         max_length: int = 128,
-        c: float = 1.0,
-        alpha: float = 1.1,
-        beta: float = 1.2,
+        c: float = 1.0  # 曲率参数
     ):
         super().__init__()
         self.c = c
         self.pos_encoding = SinusoidalPositionalEncoding(embed_dim, max_length)
         self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
 
-        self.alpha = alpha
-        self.beta = beta
+        self.alpha = 1.1
+        self.beta = 1.2
 
     def forward(self, prompt_embeds: torch.Tensor, idx_merge: list[list[list[int]]]):
         device = self.multihead_attn.in_proj_weight.device  # Ensure compatibility with model weights
@@ -871,13 +869,8 @@ class geobindV1Pipeline(StableDiffusionXLPipeline):
         # -----------------------------------
         # token merge
         use_our_method = True
-        merge_noun_weight = kwargs.get("merge_noun_weight", 1.1)
-        merge_attr_weight = kwargs.get("merge_attr_weight", 1.2)
         if use_our_method:
-            merger = TokenMergerWithAttnHyperspace(
-                embed_dim=2048, num_heads=8, max_length=128,
-                alpha=merge_noun_weight, beta=merge_attr_weight,
-            )
+            merger = TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8, max_length=128)
             if not run_standard_sd and token_refinement_steps:
                 print(f'prompt_embeds shape is {prompt_embeds.shape}')
                 prompt_embeds[0] = merger(prompt_embeds[0], indices_to_alter)
