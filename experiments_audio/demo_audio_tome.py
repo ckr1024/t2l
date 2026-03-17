@@ -27,6 +27,42 @@ from experiments_audio.audio_tome_utils import (
 )
 
 
+def _ensure_tensor_from_model_output(x):
+    # transformers ModelOutput is tuple-like and supports .to_tuple()
+    if isinstance(x, torch.Tensor):
+        return x
+    for attr in ("text_embeds", "last_hidden_state", "embeddings"):
+        if hasattr(x, attr):
+            v = getattr(x, attr)
+            if isinstance(v, torch.Tensor):
+                return v
+    if isinstance(x, (tuple, list)) and len(x) > 0 and isinstance(x[0], torch.Tensor):
+        return x[0]
+    if hasattr(x, "to_tuple"):
+        t = x.to_tuple()
+        if isinstance(t, (tuple, list)) and len(t) > 0 and isinstance(t[0], torch.Tensor):
+            return t[0]
+    return x
+
+
+def _patch_audioldm2_for_transformers_v5(pipe):
+    """
+    diffusers==0.36.0 expects CLAP get_text_features() to return a Tensor.
+    transformers==5.x may return a ModelOutput, which breaks diffusers slicing.
+    """
+    text_encoder = getattr(pipe, "text_encoder", None)
+    if text_encoder is None or not hasattr(text_encoder, "get_text_features"):
+        return
+
+    orig = text_encoder.get_text_features
+
+    def wrapped_get_text_features(*args, **kwargs):
+        out = orig(*args, **kwargs)
+        return _ensure_tensor_from_model_output(out)
+
+    text_encoder.get_text_features = wrapped_get_text_features
+
+
 def _encode_audioldm2_prompt(pipe, prompt: str, device: str):
     """
     AudioLDM2Pipeline encode_prompt signatures vary across diffusers versions.
@@ -136,7 +172,7 @@ def parse_args():
                    help="AudioLDM2 model")
     p.add_argument("--output_dir", default="demo_output_audio_tome")
     p.add_argument("--cache_dir", default=None,
-                   help="HF cache dir (default: <output_dir>/.hf_cache)")
+                   help="HF cache root dir (recommended: a persistent path)")
     p.add_argument("--offline", action="store_true",
                    help="Do not download; use local cache only")
     p.add_argument("--seed", type=int, default=42)
@@ -156,16 +192,32 @@ def main():
 
     print("Loading AudioLDM2 pipeline …")
     try:
+        # If a cache dir is provided, force *all* HF caches to use it.
+        # This prevents repeated downloads across jobs/nodes.
+        cache_dir = os.path.abspath(os.path.expanduser(args.cache_dir)) if args.cache_dir else None
+        if cache_dir is not None:
+            os.makedirs(cache_dir, exist_ok=True)
+            os.environ["HF_HOME"] = cache_dir
+            os.environ["HF_HUB_CACHE"] = os.path.join(cache_dir, "hub")
+            os.environ["TRANSFORMERS_CACHE"] = os.path.join(cache_dir, "transformers")
+            os.environ["DIFFUSERS_CACHE"] = os.path.join(cache_dir, "diffusers")
+
         from diffusers import AudioLDM2Pipeline
         import diffusers
         import transformers
         print(f"Versions: torch={torch.__version__} diffusers={diffusers.__version__} transformers={transformers.__version__}")
-        cache_dir = args.cache_dir or os.path.join(args.output_dir, ".hf_cache")
+        if cache_dir is None:
+            # Match run_demo.py behavior: rely on HuggingFace defaults.
+            # (User can still control via existing env vars.)
+            cache_dir = None
+
+        print(f"Cache: cache_dir={cache_dir!r} offline={bool(args.offline)}")
         pipe = AudioLDM2Pipeline.from_pretrained(
             args.model_id, torch_dtype=torch.float16,
             cache_dir=cache_dir,
             local_files_only=bool(args.offline),
         ).to(device)
+        _patch_audioldm2_for_transformers_v5(pipe)
     except Exception as e:
         print(f"Failed to load AudioLDM2: {e}")
         print("Install: pip install diffusers[torch] transformers scipy")
