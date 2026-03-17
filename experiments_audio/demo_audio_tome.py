@@ -22,8 +22,103 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from experiments_audio.audio_tome_utils import (
     parse_audio_prompt,
+    token_merge_audio,
 )
-from experiments_audio.run_audio_tome import apply_tome_to_audio_embeds
+
+
+def _encode_audioldm2_prompt(pipe, prompt: str, device: str):
+    """
+    AudioLDM2Pipeline encode_prompt signatures vary across diffusers versions.
+    This wrapper returns a dict of kwargs that can be passed into `pipe(...)`
+    to avoid version-specific internal encoding bugs.
+    """
+    if not hasattr(pipe, "encode_prompt"):
+        return {"prompt": prompt}
+
+    # Try the most common kwarg names across versions.
+    tried = []
+    for kwargs in (
+        {
+            "prompt": prompt,
+            "device": device,
+            "num_waveforms_per_prompt": 1,
+            "do_classifier_free_guidance": True,
+        },
+        {
+            "prompt": prompt,
+            "device": device,
+            "num_waveforms_per_prompt": 1,
+            "do_classifier_free_guidance": True,
+            "negative_prompt": "",
+        },
+        {
+            "prompt": prompt,
+            "device": device,
+            "num_waveforms_per_prompt": 1,
+        },
+        {"prompt": prompt, "device": device},
+    ):
+        try:
+            out = pipe.encode_prompt(**kwargs)
+            break
+        except TypeError as e:
+            tried.append(str(e))
+            out = None
+    else:
+        return {"prompt": prompt}
+
+    # Normalize outputs into kwargs for pipe.__call__.
+    # Known patterns:
+    # - (prompt_embeds, attention_mask, generated_prompt_embeds, generated_attention_mask)
+    # - (prompt_embeds, attention_mask)
+    # - prompt_embeds
+    if isinstance(out, torch.Tensor):
+        return {"prompt_embeds": out}
+
+    if isinstance(out, (tuple, list)):
+        result = {}
+        if len(out) >= 1 and isinstance(out[0], torch.Tensor):
+            result["prompt_embeds"] = out[0]
+        if len(out) >= 2 and isinstance(out[1], torch.Tensor):
+            result["attention_mask"] = out[1]
+        if len(out) >= 3 and isinstance(out[2], torch.Tensor):
+            result["generated_prompt_embeds"] = out[2]
+        if len(out) >= 4 and isinstance(out[3], torch.Tensor):
+            result["generated_attention_mask"] = out[3]
+        if result:
+            return result
+
+    # Fallback
+    return {"prompt": prompt}
+
+
+def _apply_tome_to_prompt_embeds(prompt_embeds: torch.Tensor, idx_merge, use_hyp: bool):
+    """
+    Apply token merge to the *conditional* embedding when CFG is used.
+    Supports shapes:
+      - (seq, dim)
+      - (batch, seq, dim)
+      - (2*batch, seq, dim) where first half is unconditional.
+    """
+    if prompt_embeds.dim() == 2:
+        return token_merge_audio(prompt_embeds, idx_merge, use_hyperbolic=use_hyp, curvature=1.0)
+
+    if prompt_embeds.dim() == 3:
+        merged = prompt_embeds.clone()
+        b = merged.shape[0]
+        if b >= 2:
+            # Heuristic: if CFG was used, conditional often sits in the 2nd half.
+            start = b // 2
+            merged[start:] = token_merge_audio(
+                merged[start:], idx_merge, use_hyperbolic=use_hyp, curvature=1.0
+            )
+        else:
+            merged[:] = token_merge_audio(
+                merged, idx_merge, use_hyperbolic=use_hyp, curvature=1.0
+            )
+        return merged
+
+    return prompt_embeds
 
 
 DEMO_PROMPTS = [
@@ -39,6 +134,10 @@ def parse_args():
     p.add_argument("--model_id", default="cvssp/audioldm2",
                    help="AudioLDM2 model")
     p.add_argument("--output_dir", default="demo_output_audio_tome")
+    p.add_argument("--cache_dir", default=None,
+                   help="HF cache dir (default: <output_dir>/.hf_cache)")
+    p.add_argument("--offline", action="store_true",
+                   help="Do not download; use local cache only")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--audio_length", type=float, default=3.0,
                    help="Shorter audio for fast demo")
@@ -57,8 +156,11 @@ def main():
     print("Loading AudioLDM2 pipeline …")
     try:
         from diffusers import AudioLDM2Pipeline
+        cache_dir = args.cache_dir or os.path.join(args.output_dir, ".hf_cache")
         pipe = AudioLDM2Pipeline.from_pretrained(
             args.model_id, torch_dtype=torch.float16,
+            cache_dir=cache_dir,
+            local_files_only=bool(args.offline),
         ).to(device)
     except Exception as e:
         print(f"Failed to load AudioLDM2: {e}")
@@ -92,29 +194,19 @@ def main():
             g = torch.Generator(device).manual_seed(args.seed)
 
             try:
-                if use_tome and idx_merge:
-                    prompt_embeds = apply_tome_to_audio_embeds(
-                        pipe,
-                        prompt,
-                        idx_merge,
-                        use_hyperbolic=use_hyp,
-                        curvature=1.0,
+                call_kwargs = _encode_audioldm2_prompt(pipe, prompt, device=device)
+                if use_tome and idx_merge and "prompt_embeds" in call_kwargs:
+                    call_kwargs["prompt_embeds"] = _apply_tome_to_prompt_embeds(
+                        call_kwargs["prompt_embeds"], idx_merge, use_hyp=use_hyp
                     )
-                    output = pipe(
-                        prompt_embeds=prompt_embeds,
-                        audio_length_in_s=args.audio_length,
-                        num_inference_steps=args.n_inference_steps,
-                        guidance_scale=3.5,
-                        generator=g,
-                    )
-                else:
-                    output = pipe(
-                        prompt=prompt,
-                        audio_length_in_s=args.audio_length,
-                        num_inference_steps=args.n_inference_steps,
-                        guidance_scale=3.5,
-                        generator=g,
-                    )
+
+                output = pipe(
+                    **call_kwargs,
+                    audio_length_in_s=args.audio_length,
+                    num_inference_steps=args.n_inference_steps,
+                    guidance_scale=3.5,
+                    generator=g,
+                )
 
                 audio = output.audios[0]
                 audio_path = os.path.join(prompt_dir, f"{label}.wav")
