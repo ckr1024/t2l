@@ -105,8 +105,10 @@ def contrastive_loss_hyperspace(
     for n_vec in other_anchors:
         dist_neg_list.append(hyperbolic_distance(query_vec, n_vec, c = 1))  
     dist_neg = torch.stack(dist_neg_list, dim=0) 
-    numerator = torch.exp(-dist_pos / temp)
-    denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0)
+    numerator = torch.exp(-dist_pos / temp) 
+    print(f'numerator is {numerator}')
+    denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0) 
+    print(f'denominator is {denominator}')
     loss_cont = -torch.log(numerator / (denominator + 1e-8) + 1e-8)  
     return loss_cont.mean()  
 
@@ -114,7 +116,7 @@ import torch
 import math
 
 MIN_NORM = 1e-15
-BALL_EPS = {torch.float16: 4e-3, torch.float32: 1e-5, torch.float64: 1e-10}
+BALL_EPS = {torch.float16: 4e-3, torch.float32: 1e-5}
 
 
 
@@ -246,30 +248,20 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         embed_dim: int = 2048,
         num_heads: int = 8,
         max_length: int = 128,
-        c: float = 1.0,
-        hyper_weight: float = 0.15,
+        c: float = 1.0  # 曲率参数
     ):
         super().__init__()
         self.c = c
-        self.embed_dim = embed_dim
-        self.hyper_weight = hyper_weight
         self.pos_encoding = SinusoidalPositionalEncoding(embed_dim, max_length)
+        self.multihead_attn = nn.MultiheadAttention(embed_dim, num_heads, batch_first=True)
 
         self.alpha = 1.1
         self.beta = 1.2
 
-    @staticmethod
-    def _cross_attn(query, key, value):
-        """Parameter-free scaled dot-product cross-attention."""
-        d = query.shape[-1]
-        scores = torch.matmul(query, key.transpose(-2, -1)) / math.sqrt(d)
-        weights = F.softmax(scores, dim=-1)
-        return torch.matmul(weights, value)
-
     def forward(self, prompt_embeds: torch.Tensor, idx_merge: list[list[list[int]]]):
-        device = prompt_embeds.device
-        dtype = prompt_embeds.dtype
-        prompt_embeds = prompt_embeds.unsqueeze(0)  # => (1, seq_len, embed_dim)
+        device = self.multihead_attn.in_proj_weight.device  # Ensure compatibility with model weights
+        dtype = self.multihead_attn.in_proj_weight.dtype
+        prompt_embeds = prompt_embeds.to(device=device, dtype=dtype).unsqueeze(0)  # => (1, seq_len, embed_dim)
 
         batch_size, seq_len, embed_dim = prompt_embeds.size()
         pos = torch.arange(seq_len, device=device, dtype=torch.int)
@@ -295,8 +287,18 @@ class TokenMergerWithAttnHyperspace(nn.Module):
             attr_vectors = prompt_embeds_hyper[:, attr_indices, :] 
             noun_vectors_2 = prompt_embeds[:, noun_indices, :] 
             attr_vectors_2 = prompt_embeds[:, attr_indices, :] 
-            attn_output_2 = self._cross_attn(noun_vectors_2, attr_vectors_2, attr_vectors_2)
-            attn_output = self._cross_attn(noun_vectors, attr_vectors, attr_vectors)
+            attn_output_2, _ = self.multihead_attn(
+                query=noun_vectors_2,  
+                key=attr_vectors_2,    
+                value=attr_vectors_2,  
+            )
+
+
+            attn_output, _ = self.multihead_attn(
+                query=noun_vectors,  
+                key=attr_vectors,    
+                value=attr_vectors,  
+            )
           
             merged_vector = mobius_addition(attn_output,noun_vectors)
             merged_vector_2 = attn_output_2 + noun_vectors_2
@@ -312,7 +314,7 @@ class TokenMergerWithAttnHyperspace(nn.Module):
             prompt_embeds[:, noun_main_idx, :] = merged_sum_2
             if len(noun_indices) > 1:
                 prompt_embeds_hyper[:, noun_indices[1:], :] = 0
-                prompt_embeds[:, noun_indices[1:], :] = 0
+                prompt_embeds[:, noun_main_idx[1:], :] = 0
             prompt_embeds_hyper[:, attr_indices, :] = 0
             prompt_embeds[:, attr_indices, :] = 0
 
@@ -320,7 +322,7 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         prompt_embeds_hyper = prompt_embeds_hyper.squeeze(0)
         prompt_embeds = prompt_embeds.squeeze(0)
         # --------------------双曲空间 & 欧式空间的token embedding的加权和--------------------
-        return prompt_embeds + self.hyper_weight * prompt_embeds_hyper
+        return prompt_embeds + 0.1 * prompt_embeds_hyper
 
 
 def get_centroid(attn_map: torch.Tensor) -> torch.Tensor:
@@ -629,41 +631,20 @@ class geobindPipeline(StableDiffusionXLPipeline):
         """Update the merged token according to the computed loss."""
         loss = loss * step_size
         grad_cond = torch.autograd.grad(loss.requires_grad_(True), [stoken])[0]
-        grad_norm = grad_cond.norm()
-        if grad_norm > 1.0:
-            grad_cond = grad_cond / grad_norm
         stoken = stoken - grad_cond
         return stoken
 
-    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor,
-                  use_our_method: bool, other_anchors, iter_num=3,
-                  temperature=0.07,
-                  lambda_mse=1.0, lambda_cont=0.01, lambda_reg=0.15,
-                  step_size=5000):
+    def opt_token(self, latents: torch.Tensor, t, stoken, prompt_anchor, use_our_method: bool, other_anchors, iter_num=3, temperature=0.07, lambda_mse=1.0, lambda_cont=1e-6):
         """
-        Semantic binding optimisation with regularisation to preserve noun
-        semantics.
-
-        lambda_mse  — weight for the language (noise-matching) loss
-        lambda_cont — weight for the hyperbolic contrastive loss
-        lambda_reg  — weight for the drift regularisation (keeps stoken
-                      close to its original value so noun semantics survive)
-        step_size   — gradient-descent learning rate
+        latents: 128 128 4
+        stoken: dim
+        prompt_anchor: 77 dim
         """
         stoken.requires_grad_(True)
-        stoken_orig = stoken.detach().clone()
-
-        with torch.no_grad():
-            pos_idx = 1 if prompt_anchor.ndim >= 3 and prompt_anchor.shape[0] == 2 else 0
-            target_repr = prompt_anchor[pos_idx].mean(dim=0)
-            other_reprs = [
-                oa[pos_idx].mean(dim=0) if (oa.ndim >= 3 and oa.shape[0] == 2) else oa.mean(dim=0)
-                for oa in other_anchors
-            ]
 
         latents = latents.clone().detach().unsqueeze(0)
         iteration = 0
-
+     
         with torch.no_grad():
             noise_pred_anchor = self.unet(
                 latents,
@@ -675,6 +656,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
             ).sample
         while True:
             iteration += 1
+            # print(f'stoken for noise is is {stoken}')
             noise_pred_token = self.unet(
                 latents,
                 t,
@@ -683,25 +665,31 @@ class geobindPipeline(StableDiffusionXLPipeline):
                 cross_attention_kwargs=self.cross_attention_kwargs,
                 added_cond_kwargs=self.added_cond_kwargs2,
             ).sample
-
+        
             loss_mse = torch.nn.functional.mse_loss(noise_pred_token, noise_pred_anchor)
-            loss_reg = torch.nn.functional.mse_loss(stoken, stoken_orig)
-
+            # print(f'loss_mse is {loss_mse}')
+            use_our_method = True
+            # ---------------------------------双曲空间中的对比学习
             if use_our_method:
+                # print(f'stoken for contrastive learning is {stoken}')
                 loss_cont = contrastive_loss_hyperspace(
-                    stoken,
-                    target_repr,
-                    other_reprs,
-                    temp=temperature,
-                )
-                total_loss = (lambda_mse * loss_mse
-                              + lambda_cont * loss_cont
-                              + lambda_reg * loss_reg)
+                     stoken,
+                     prompt_anchor,
+                     other_anchors,
+                     temp=temperature
+                 )
+                print(f'loss_mse loss is {loss_mse}')
+                print(f'loss_cont loss is {loss_cont}')
+                total_loss = lambda_mse * loss_mse + lambda_cont * loss_cont
+                print(f'total_loss is {total_loss}')
             else:
-                total_loss = lambda_mse * loss_mse + lambda_reg * loss_reg
+                total_loss = loss_mse
 
-            stoken = self._update_stoken(stoken, total_loss, step_size)
+            stoken = self._update_stoken(stoken, total_loss, 10000)
             if iteration >= iter_num:
+                print(
+                    f"Semantic binding loss optimization Exceeded max number of iterations ({iter_num}) "
+                )
                 break
 
         with torch.no_grad():
@@ -920,17 +908,16 @@ class geobindPipeline(StableDiffusionXLPipeline):
             clip_skip=self.clip_skip,
         )
 
+        # stoken1, stoken2 = prompt_embeds[0,2], prompt_embeds[0,6]
         # -----------------------------------
         # token merge
         use_our_method = True
         if use_our_method:
-            hyper_merger = kwargs.get("hyper_merger", None)
-            if hyper_merger is None:
-                hyper_merger = TokenMergerWithAttnHyperspace(
-                    embed_dim=2048, num_heads=8, max_length=128
-                ).to(device)
+            #修改1,2使用的地方
+            merger = TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8, max_length=128)
             if not run_standard_sd and token_refinement_steps:
-                prompt_embeds[0] = hyper_merger(prompt_embeds[0], indices_to_alter)
+                print(f'prompt_embeds shape is {prompt_embeds.shape}')
+                prompt_embeds[0] = merger(prompt_embeds[0], indices_to_alter)
         else:
             if not run_standard_sd and token_refinement_steps:
                 prompt_embeds[0] = token_merge(prompt_embeds[0], indices_to_alter)
@@ -1097,16 +1084,21 @@ class geobindPipeline(StableDiffusionXLPipeline):
                         token_control, attention_control = tome_control_steps
                         # EOT replace
                         if i == eot_replace_step:
-                            prompt_embeds2[1, prompt_length + 1 :] = prompt_anchor3[0][
+                            prompt_embeds[1, prompt_length + 1 :] = prompt_anchor3[0][
                                 prompt_length + 1 :]
                         if i < token_control:
                             for idx, panchor in enumerate(panchors):
+                                # print(f'prompt_embeds is {prompt_embeds}')
+                                # print(f'indices_to_alter[idx][0][0] is {indices_to_alter[idx][0][0]}')
+                                # print(f'prompt_embeds[1, indices_to_alter[idx][0][0]] is {prompt_embeds[1, indices_to_alter[idx][0][0]]}')
                                 stoken = (
-                                    prompt_embeds2[1, indices_to_alter[idx][0][0]]
+                                    prompt_embeds[1, indices_to_alter[idx][0][0]]
                                     .detach()
                                     .clone()
                                 )
-                                other_panchors = [p for j, p in enumerate(panchors) if j != idx]
+                                # print(f'stoken for self.opt_token is {stoken}')
+                                other_panchors = [p for i, p in enumerate(panchors) if i != idx]
+                                # print(f'stoken input is {stoken}')
                                 stoken, latent_anchor[idx] = self.opt_token(
                                     latent_anchor[idx],
                                     t,
@@ -1116,7 +1108,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                     other_panchors,
                                     token_refinement_steps,
                                 )
-                                prompt_embeds2[1, indices_to_alter[idx][0][0]] = stoken
+                                prompt_embeds[1, indices_to_alter[idx][0][0]] = stoken
                         # entropy loss for attention refinement
                         if i < attention_control:
                             latents_up, loss, prompt_embeds2 = (
@@ -1124,7 +1116,7 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                     latents=latents_up,
                                     indices_to_alter=indices_to_alter,
                                     threshold=thresholds[i],
-                                    text_embeddings=prompt_embeds2,
+                                    text_embeddings=prompt_embeds,
                                     attention_store=attention_store,
                                     step_size=scale_factor * scale_range[i],
                                     t=t,
