@@ -13,9 +13,20 @@ Two strategies:
 import torch
 from typing import List, Tuple, Optional
 from utils.hyperbolic_utils import (
-    exp_map_zero, log_map_zero, mobius_add, mobius_scalar_mult,
-    project_to_ball, hyperbolic_distance,
+    exp_map,
+    log_map,
+    mobius_addition,
+    hyperbolic_distance,
 )
+
+
+def mobius_scalar_mult(scalar: float, x: torch.Tensor, c: float) -> torch.Tensor:
+    """Hyperbolic scalar multiplication on the Poincaré ball.
+
+    Implemented via:
+      a ⊗ x = exp_0( a * log_0(x) )
+    """
+    return exp_map(scalar * log_map(x, c), c)
 
 
 # ============================================================
@@ -110,19 +121,19 @@ def token_merge_adaptive(
         noun_scaled = noun_tokens / scale
         attr_scaled = attr_tokens / scale
 
-        noun_hyp = exp_map_zero(noun_scaled, c)
-        attr_hyp = exp_map_zero(attr_scaled, c)
+        noun_hyp = exp_map(noun_scaled, c)
+        attr_hyp = exp_map(attr_scaled, c)
 
         result = mobius_scalar_mult(1.1, noun_hyp[0:1], c)
         for i in range(1, noun_hyp.shape[0]):
             next_tok = mobius_scalar_mult(1.1, noun_hyp[i:i+1], c)
-            result = mobius_add(result, next_tok, c)
+            result = mobius_addition(result, next_tok, c)
 
         for i in range(attr_hyp.shape[0]):
             next_tok = mobius_scalar_mult(1.2, attr_hyp[i:i+1], c)
-            result = mobius_add(result, next_tok, c)
+            result = mobius_addition(result, next_tok, c)
 
-        composite = log_map_zero(result, c) * scale
+        composite = log_map(result, c) * scale
 
         prompt_embeds[noun_idx] = composite.squeeze(0)
         if len(idxs[0]) > 1:
