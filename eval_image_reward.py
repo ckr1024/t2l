@@ -34,9 +34,7 @@ import traceback
 from datetime import datetime
 
 import torch
-from PIL import Image
 from tqdm import tqdm
-import ImageReward as reward
 
 SUBSETS = ["color", "shape", "texture"]
 
@@ -64,6 +62,36 @@ def setup_logging(output_dir):
     return logger
 
 log = logging.getLogger("ir_eval")
+
+# ─────────────────────────────────────────────────────────
+#  ImageReward import compatibility
+# ─────────────────────────────────────────────────────────
+
+def import_image_reward():
+    """
+    Import ImageReward with a compatibility shim for newer transformers.
+    """
+    try:
+        import ImageReward as reward_module
+        return reward_module
+    except ImportError as e:
+        err = str(e)
+        if "apply_chunking_to_forward" not in err:
+            raise
+
+        try:
+            import transformers.modeling_utils as modeling_utils
+            from transformers.pytorch_utils import apply_chunking_to_forward
+            modeling_utils.apply_chunking_to_forward = apply_chunking_to_forward
+        except Exception as patch_err:
+            raise ImportError(
+                "ImageReward import failed and compatibility patch could not be applied. "
+                "Try installing a compatible transformers version, e.g. "
+                "`pip install \"transformers==4.30.2\"`."
+            ) from patch_err
+
+        import ImageReward as reward_module
+        return reward_module
 
 # ─────────────────────────────────────────────────────────
 #  Result persistence
@@ -235,6 +263,12 @@ def main():
         log.info(f"  {method}/{subset}  -- {n} images")
 
     results = {} if args.force else load_results(args.image_root)
+
+    try:
+        reward = import_image_reward()
+    except Exception:
+        log.error(f"Failed to import ImageReward:\n{traceback.format_exc()}")
+        return
 
     log.info(f"Loading ImageReward model: {args.reward_path} ...")
     try:
