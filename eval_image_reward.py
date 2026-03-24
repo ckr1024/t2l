@@ -33,6 +33,7 @@ import argparse
 import traceback
 import re
 import importlib
+import types
 from datetime import datetime
 
 import torch
@@ -187,8 +188,12 @@ def import_image_reward():
     last_error = None
     for _ in range(6):
         try:
-            import ImageReward as reward_module
-            return reward_module
+            # Prefer importing ImageReward.utils directly to avoid
+            # ImageReward.__init__ side-effects (e.g., ReFL/diffusers imports).
+            utils_module = importlib.import_module("ImageReward.utils")
+            if hasattr(utils_module, "load"):
+                return types.SimpleNamespace(load=utils_module.load)
+            raise ImportError("ImageReward.utils loaded but no `load` function found")
         except ImportError as e:
             last_error = e
             msg = str(e)
