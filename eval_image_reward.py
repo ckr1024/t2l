@@ -212,6 +212,45 @@ def import_image_reward():
         "`pip install \"transformers==4.30.2\"`."
     ) from last_error
 
+
+def patch_tokenizer_compat():
+    """
+    Patch tokenizer classes that miss `additional_special_tokens_ids`.
+    Some ImageReward BLIP code accesses this attribute directly.
+    """
+    try:
+        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+    except Exception:
+        return False
+
+    if hasattr(PreTrainedTokenizerBase, "additional_special_tokens_ids"):
+        return True
+
+    def _get_additional_special_tokens_ids(self):
+        tokens = getattr(self, "additional_special_tokens", None) or []
+        ids = []
+        for t in tokens:
+            try:
+                token_id = self.convert_tokens_to_ids(t)
+                if token_id is not None and token_id != self.unk_token_id:
+                    ids.append(token_id)
+            except Exception:
+                continue
+
+        # Fallback to bos token id to avoid downstream indexing crashes.
+        if not ids:
+            bos_id = getattr(self, "bos_token_id", None)
+            if bos_id is not None:
+                ids = [bos_id]
+        return ids
+
+    setattr(
+        PreTrainedTokenizerBase,
+        "additional_special_tokens_ids",
+        property(_get_additional_special_tokens_ids),
+    )
+    return True
+
 # ─────────────────────────────────────────────────────────
 #  Result persistence
 # ─────────────────────────────────────────────────────────
@@ -390,14 +429,26 @@ def main():
         return
 
     log.info(f"Loading ImageReward model: {args.reward_path} ...")
+    load_kwargs = {"name": args.reward_path}
+    if args.med_config:
+        load_kwargs["med_config"] = args.med_config
+
     try:
-        load_kwargs = {"name": args.reward_path}
-        if args.med_config:
-            load_kwargs["med_config"] = args.med_config
         ir_model = reward.load(**load_kwargs)
-    except Exception:
-        log.error(f"Failed to load ImageReward:\n{traceback.format_exc()}")
-        return
+    except Exception as e:
+        if "additional_special_tokens_ids" not in str(e):
+            log.error(f"Failed to load ImageReward:\n{traceback.format_exc()}")
+            return
+
+        log.warning(
+            "Tokenizer compatibility issue detected; applying runtime patch and retrying ..."
+        )
+        patch_tokenizer_compat()
+        try:
+            ir_model = reward.load(**load_kwargs)
+        except Exception:
+            log.error(f"Failed to load ImageReward after tokenizer patch:\n{traceback.format_exc()}")
+            return
 
     for method, subset, _ in pairs:
         if subset not in results:
