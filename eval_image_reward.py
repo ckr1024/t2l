@@ -213,43 +213,73 @@ def import_image_reward():
     ) from last_error
 
 
-def patch_tokenizer_compat():
+def patch_image_reward_internals(reward_module):
     """
-    Patch tokenizer classes that miss `additional_special_tokens_ids`.
-    Some ImageReward BLIP code accesses this attribute directly.
+    Apply all runtime compatibility patches to ImageReward's internals
+    so it works with newer transformers versions.
+
+    Patches applied:
+      1. Replace init_tokenizer so it doesn't rely on additional_special_tokens_ids.
+      2. Add all_tied_weights_keys to PreTrainedModel if missing.
+      3. Neutralise init_weights on the BLIP BertModel if tie_weights still fails.
     """
+    # ── Patch 1: init_tokenizer ────────────────────────────────────────────
     try:
-        from transformers.tokenization_utils_base import PreTrainedTokenizerBase
-    except Exception:
-        return False
+        import ImageReward.models.BLIP.blip as blip_module
+        from transformers import BertTokenizer
 
-    if hasattr(PreTrainedTokenizerBase, "additional_special_tokens_ids"):
-        return True
-
-    def _get_additional_special_tokens_ids(self):
-        tokens = getattr(self, "additional_special_tokens", None) or []
-        ids = []
-        for t in tokens:
+        def patched_init_tokenizer():
+            tokenizer = BertTokenizer.from_pretrained("bert-base-uncased")
+            tokenizer.add_special_tokens({"additional_special_tokens": ["[ENC]"]})
+            # Derive enc_token_id without relying on additional_special_tokens_ids.
             try:
-                token_id = self.convert_tokens_to_ids(t)
-                if token_id is not None and token_id != self.unk_token_id:
-                    ids.append(token_id)
-            except Exception:
-                continue
+                enc_id = tokenizer.additional_special_tokens_ids[0]
+            except (AttributeError, IndexError, TypeError):
+                enc_id = tokenizer.convert_tokens_to_ids("[ENC]")
+                if enc_id == tokenizer.unk_token_id:
+                    # Fallback: use vocab size - 1 as a harmless placeholder.
+                    enc_id = len(tokenizer) - 1
+            tokenizer.enc_token_id = enc_id
+            return tokenizer
 
-        # Fallback to bos token id to avoid downstream indexing crashes.
-        if not ids:
-            bos_id = getattr(self, "bos_token_id", None)
-            if bos_id is not None:
-                ids = [bos_id]
-        return ids
+        blip_module.init_tokenizer = patched_init_tokenizer
+        log.info("  [compat] Patched ImageReward.models.BLIP.blip.init_tokenizer")
+    except Exception as e:
+        log.warning(f"  [compat] Could not patch init_tokenizer: {e}")
 
-    setattr(
-        PreTrainedTokenizerBase,
-        "additional_special_tokens_ids",
-        property(_get_additional_special_tokens_ids),
-    )
-    return True
+    # ── Patch 2: PreTrainedModel.all_tied_weights_keys ────────────────────
+    try:
+        from transformers.modeling_utils import PreTrainedModel
+        if not hasattr(PreTrainedModel, "all_tied_weights_keys"):
+            PreTrainedModel.all_tied_weights_keys = property(lambda self: [])
+            log.info("  [compat] Added PreTrainedModel.all_tied_weights_keys")
+    except Exception as e:
+        log.warning(f"  [compat] Could not patch all_tied_weights_keys: {e}")
+
+    # ── Patch 3: BLIP BertModel.init_weights safety net ───────────────────
+    try:
+        import ImageReward.models.BLIP.med as med_module
+
+        original_init_weights = getattr(med_module.BertModel, "init_weights", None)
+
+        def safe_init_weights(self):
+            try:
+                if original_init_weights:
+                    original_init_weights(self)
+                else:
+                    super(med_module.BertModel, self).init_weights()
+            except AttributeError as exc:
+                if "all_tied_weights_keys" in str(exc):
+                    # tie_weights references all_tied_weights_keys; skip gracefully.
+                    self._init_weights(self)
+                    log.warning("  [compat] Skipped tie_weights (all_tied_weights_keys missing)")
+                else:
+                    raise
+
+        med_module.BertModel.init_weights = safe_init_weights
+        log.info("  [compat] Patched ImageReward.models.BLIP.med.BertModel.init_weights")
+    except Exception as e:
+        log.warning(f"  [compat] Could not patch BertModel.init_weights: {e}")
 
 # ─────────────────────────────────────────────────────────
 #  Result persistence
@@ -428,6 +458,9 @@ def main():
         log.error(f"Failed to import ImageReward:\n{traceback.format_exc()}")
         return
 
+    log.info("Applying ImageReward compatibility patches ...")
+    patch_image_reward_internals(reward)
+
     log.info(f"Loading ImageReward model: {args.reward_path} ...")
     load_kwargs = {"name": args.reward_path}
     if args.med_config:
@@ -435,20 +468,9 @@ def main():
 
     try:
         ir_model = reward.load(**load_kwargs)
-    except Exception as e:
-        if "additional_special_tokens_ids" not in str(e):
-            log.error(f"Failed to load ImageReward:\n{traceback.format_exc()}")
-            return
-
-        log.warning(
-            "Tokenizer compatibility issue detected; applying runtime patch and retrying ..."
-        )
-        patch_tokenizer_compat()
-        try:
-            ir_model = reward.load(**load_kwargs)
-        except Exception:
-            log.error(f"Failed to load ImageReward after tokenizer patch:\n{traceback.format_exc()}")
-            return
+    except Exception:
+        log.error(f"Failed to load ImageReward:\n{traceback.format_exc()}")
+        return
 
     for method, subset, _ in pairs:
         if subset not in results:
