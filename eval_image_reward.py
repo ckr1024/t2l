@@ -31,6 +31,8 @@ import json
 import logging
 import argparse
 import traceback
+import re
+import importlib
 from datetime import datetime
 
 import torch
@@ -71,27 +73,58 @@ def import_image_reward():
     """
     Import ImageReward with a compatibility shim for newer transformers.
     """
-    try:
-        import ImageReward as reward_module
-        return reward_module
-    except ImportError as e:
-        err = str(e)
-        if "apply_chunking_to_forward" not in err:
-            raise
+    missing_re = re.compile(
+        r"cannot import name '([^']+)' from 'transformers\.modeling_utils'"
+    )
+    provider_modules = [
+        "transformers.pytorch_utils",
+        "transformers.modeling_utils",
+        "transformers.modeling_attn_mask_utils",
+        "transformers.utils",
+    ]
 
+    def patch_symbol(symbol_name):
+        import transformers.modeling_utils as modeling_utils
+        if hasattr(modeling_utils, symbol_name):
+            return True
+
+        for mod_name in provider_modules:
+            try:
+                mod = importlib.import_module(mod_name)
+            except Exception:
+                continue
+            if hasattr(mod, symbol_name):
+                setattr(modeling_utils, symbol_name, getattr(mod, symbol_name))
+                return True
+        return False
+
+    last_error = None
+    for _ in range(6):
         try:
-            import transformers.modeling_utils as modeling_utils
-            from transformers.pytorch_utils import apply_chunking_to_forward
-            modeling_utils.apply_chunking_to_forward = apply_chunking_to_forward
-        except Exception as patch_err:
-            raise ImportError(
-                "ImageReward import failed and compatibility patch could not be applied. "
-                "Try installing a compatible transformers version, e.g. "
-                "`pip install \"transformers==4.30.2\"`."
-            ) from patch_err
+            import ImageReward as reward_module
+            return reward_module
+        except ImportError as e:
+            last_error = e
+            msg = str(e)
+            m = missing_re.search(msg)
+            if not m:
+                raise
 
-        import ImageReward as reward_module
-        return reward_module
+            missing_symbol = m.group(1)
+            ok = patch_symbol(missing_symbol)
+            if not ok:
+                break
+
+            # Remove partially-imported ImageReward modules before retrying.
+            for mod_name in list(sys.modules.keys()):
+                if mod_name == "ImageReward" or mod_name.startswith("ImageReward."):
+                    sys.modules.pop(mod_name, None)
+
+    raise ImportError(
+        "ImageReward import failed due to incompatible transformers API. "
+        "Please install a compatible version, e.g. "
+        "`pip install \"transformers==4.30.2\"`."
+    ) from last_error
 
 # ─────────────────────────────────────────────────────────
 #  Result persistence
