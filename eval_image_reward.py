@@ -69,6 +69,88 @@ log = logging.getLogger("ir_eval")
 #  ImageReward import compatibility
 # ─────────────────────────────────────────────────────────
 
+def _local_transformers_shims():
+    """
+    Backward-compatible fallbacks for symbols removed from
+    transformers.modeling_utils in newer transformers versions.
+    """
+    import torch.nn as nn
+
+    def apply_chunking_to_forward(forward_fn, chunk_size, chunk_dim, *input_tensors):
+        if len(input_tensors) == 0:
+            raise ValueError("input_tensors has to be a tuple/list of tensors")
+
+        if chunk_size > 0:
+            tensor_shape = input_tensors[0].shape[chunk_dim]
+            for input_tensor in input_tensors:
+                if input_tensor.shape[chunk_dim] != tensor_shape:
+                    raise ValueError(
+                        "All input tensors must have the same shape at chunk_dim"
+                    )
+            if tensor_shape % chunk_size != 0:
+                raise ValueError(
+                    "The dimension to be chunked must be a multiple of chunk_size"
+                )
+
+            num_chunks = tensor_shape // chunk_size
+            input_tensors_chunks = tuple(
+                input_tensor.chunk(num_chunks, dim=chunk_dim)
+                for input_tensor in input_tensors
+            )
+            output_chunks = [
+                forward_fn(*chunked_inputs)
+                for chunked_inputs in zip(*input_tensors_chunks)
+            ]
+            return torch.cat(output_chunks, dim=chunk_dim)
+
+        return forward_fn(*input_tensors)
+
+    def find_pruneable_heads_and_indices(
+        heads, n_heads, head_size, already_pruned_heads
+    ):
+        mask = torch.ones(n_heads, head_size)
+        heads = set(heads) - already_pruned_heads
+        for head in heads:
+            head = head - sum(1 if h < head else 0 for h in already_pruned_heads)
+            mask[head] = 0
+
+        mask = mask.view(-1).contiguous().eq(1)
+        index = torch.arange(len(mask), dtype=torch.long)[mask]
+        return heads, index
+
+    def prune_linear_layer(layer, index, dim=0):
+        index = index.to(layer.weight.device)
+        W = layer.weight.index_select(dim, index).clone().detach()
+
+        if layer.bias is not None:
+            if dim == 1:
+                b = layer.bias.clone().detach()
+            else:
+                b = layer.bias[index].clone().detach()
+
+        new_size = list(layer.weight.size())
+        new_size[dim] = len(index)
+        new_layer = nn.Linear(
+            new_size[1], new_size[0], bias=layer.bias is not None
+        ).to(layer.weight.device)
+
+        new_layer.weight.requires_grad = False
+        new_layer.weight.copy_(W.contiguous())
+        new_layer.weight.requires_grad = True
+
+        if layer.bias is not None:
+            new_layer.bias.requires_grad = False
+            new_layer.bias.copy_(b.contiguous())
+            new_layer.bias.requires_grad = True
+
+        return new_layer
+
+    return {
+        "apply_chunking_to_forward": apply_chunking_to_forward,
+        "find_pruneable_heads_and_indices": find_pruneable_heads_and_indices,
+        "prune_linear_layer": prune_linear_layer,
+    }
+
 def import_image_reward():
     """
     Import ImageReward with a compatibility shim for newer transformers.
@@ -82,6 +164,7 @@ def import_image_reward():
         "transformers.modeling_attn_mask_utils",
         "transformers.utils",
     ]
+    local_shims = _local_transformers_shims()
 
     def patch_symbol(symbol_name):
         import transformers.modeling_utils as modeling_utils
@@ -96,6 +179,9 @@ def import_image_reward():
             if hasattr(mod, symbol_name):
                 setattr(modeling_utils, symbol_name, getattr(mod, symbol_name))
                 return True
+        if symbol_name in local_shims:
+            setattr(modeling_utils, symbol_name, local_shims[symbol_name])
+            return True
         return False
 
     last_error = None
