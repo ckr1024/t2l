@@ -1,17 +1,16 @@
+import os
 import pprint
+import warnings
 from typing import List
 
 import torch
 from PIL import Image, ImageDraw, ImageFont
 
 from configs.demo_config import RunConfig1, RunConfig2
-from pipe_tome import tomePipeline
 from utils import ptp_utils, vis_utils
 from utils.ptp_utils import AttentionStore
 from utils.hyperbolic_utils import TokenMergerWithAttnHyperspace
 from prompt_utils import PromptParser
-import os
-import warnings
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -26,16 +25,26 @@ def read_prompt(path):
     return all_prompt
 
 
-def load_model(config, device):
+def load_model(config, device, use_geobind_pipeline=False):
     stable_diffusion_version = "stabilityai/stable-diffusion-xl-base-1.0"
     if hasattr(config, "model_path") and config.model_path is not None:
         stable_diffusion_version = config.model_path
-    stable = tomePipeline.from_pretrained(
-        stable_diffusion_version,
-        torch_dtype=torch.float16,
-        variant="fp16",
-        safety_checker=None,
-    ).to(device)
+
+    if use_geobind_pipeline:
+        from pipe_geobind import geobindPipeline
+        stable = geobindPipeline.from_pretrained(
+            stable_diffusion_version,
+            torch_dtype=torch.float16, variant="fp16",
+            safety_checker=None,
+        ).to(device)
+    else:
+        from pipe_tome import tomePipeline
+        stable = tomePipeline.from_pretrained(
+            stable_diffusion_version,
+            torch_dtype=torch.float16, variant="fp16",
+            safety_checker=None,
+        ).to(device)
+
     stable.unet.requires_grad_(False)
     stable.vae.requires_grad_(False)
     prompt_parser = PromptParser(stable_diffusion_version)
@@ -60,7 +69,7 @@ def get_indices_to_alter(stable, prompt: str) -> List[int]:
 
 def run_on_prompt(
     prompt: List[str],
-    model: tomePipeline,
+    model,
     controller: AttentionStore,
     token_indices: List[int],
     prompt_anchor: List[str],
@@ -170,14 +179,38 @@ def create_comparison_grid(
 def main():
     config = RunConfig2()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    stable, prompt_parser = load_model(config, device)
 
     # ---- parse prompt ----
     if config.use_nlp:
-        import en_core_web_trf
-
-        nlp = en_core_web_trf.load()
+        import spacy
+        nlp = spacy.load("en_core_web_trf")
         doc = nlp(config.prompt)
+    else:
+        doc = None
+
+    # ---- hyperbolic merger ----
+    hyper_merger = TokenMergerWithAttnHyperspace(
+        embed_dim=2048, num_heads=8
+    ).to(device).eval()
+
+    # ---- define methods to compare ----
+    # SDXL and ToMe use pipe_tome; GeoBind uses pipe_geobind
+    methods = [
+        ("SDXL", True, False, False),
+        ("ToMe", False, False, False),
+        ("GeoBind", False, True, True),
+    ]
+    method_names = [m[0] for m in methods]
+    all_images = {name: [] for name in method_names}
+
+    prompt_output_path = config.output_path / config.prompt
+    prompt_output_path.mkdir(exist_ok=True, parents=True)
+
+    # Load both pipelines (tome for SDXL/ToMe, geobind for GeoBind)
+    stable_tome, prompt_parser = load_model(config, device, use_geobind_pipeline=False)
+    stable_geobind, _ = load_model(config, device, use_geobind_pipeline=True)
+
+    if doc is not None:
         prompt_parser.set_doc(doc)
         token_indices = prompt_parser._get_indices(config.prompt)
         prompt_anchor = prompt_parser._split_prompt(doc)
@@ -186,36 +219,20 @@ def main():
         token_indices = config.token_indices
         prompt_anchor = config.prompt_anchor
 
-    # ---- hyperbolic merger ----
-    hyper_merger = TokenMergerWithAttnHyperspace(
-        embed_dim=2048, num_heads=8
-    ).to(device).eval()
-
-    # ---- define methods to compare ----
-    methods = [
-        ("SDXL", True, False),
-        ("ToMe", False, False),
-        ("ToMe_Hyper", False, True),
-    ]
-    method_names = [m[0] for m in methods]
-    all_images = {name: [] for name in method_names}
-
-    prompt_output_path = config.output_path / config.prompt
-    prompt_output_path.mkdir(exist_ok=True, parents=True)
-
     for seed in config.seeds:
-        for method_name, run_std, use_hyper in methods:
+        for method_name, run_std, use_hyper, use_geobind in methods:
             print(f"\n{'='*50}")
             print(f"  Method: {method_name}  |  Seed: {seed}")
             print(f"  Prompt: {config.prompt}")
             print(f"{'='*50}")
 
+            model = stable_geobind if use_geobind else stable_tome
             g = torch.Generator(device).manual_seed(seed)
             controller = AttentionStore()
 
             image = run_on_prompt(
                 prompt=config.prompt,
-                model=stable,
+                model=model,
                 controller=controller,
                 token_indices=token_indices,
                 prompt_anchor=prompt_anchor,

@@ -1,0 +1,364 @@
+\documentclass[sigconf,nonacm]{acmart}
+
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+\usepackage{hyperref}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+\begin{document}
+
+\title{GeoBind: Hyperbolic-Euclidean Composite Token Learning\\for Semantic Binding in Text-to-Image Generation\\
+\large Supplementary Material}
+
+\maketitle
+
+\renewcommand{\thesection}{\Alph{section}}
+\renewcommand{\thetable}{\Alph{section}\arabic{table}}
+\renewcommand{\thefigure}{\Alph{section}\arabic{figure}}
+\renewcommand{\theequation}{\Alph{section}.\arabic{equation}}
+
+% ============================================================
+\section{Algorithm}
+\label{sec:algorithm}
+% ============================================================
+
+Algorithm~\ref{alg:geobind} presents the complete GeoBind inference procedure.
+
+\begin{algorithm}[t]
+\caption{GeoBind Inference}
+\label{alg:geobind}
+\begin{algorithmic}[1]
+\Require Prompt $P$, base T2I model $\mathcal{M}$, curvature $c$, fusion weight $\gamma$, steps $T$, token opt steps $T_{\text{tok}}$, attn opt steps $T_{\text{attn}}$
+\Ensure Generated image $\mathbf{x}_0$
+\State Parse $P$ with SpaCy $\rightarrow$ entities $\{(n_k, a_k)\}_{k=1}^K$
+\State Encode $P \rightarrow C = \{c_1, \ldots, c_L\} \in \mathbb{R}^{L \times d}$ via CLIP
+\State Normalize: $\tilde{C} \leftarrow C / \|C\|_2$
+\State Map to Poincar\'e ball: $C^{\mathcal{H}} \leftarrow \exp_\mathbf{0}^c(\tilde{C})$
+\State Add positional encoding via M\"obius addition (Eq.~5)
+\For{each entity $k = 1, \ldots, K$}
+    \State Euclidean merge: $\hat{c}_k^{\text{E}} \leftarrow \alpha \cdot c_{n_k} + \beta \cdot \sum_{j} c_{a_{k,j}}$ \Comment{Eq.~12}
+    \State Hyperbolic merge: $\hat{c}_k^{\mathcal{H}} \leftarrow$ attention-based fusion in $\mathcal{H}$ \Comment{Eq.~13--14}
+    \State Geometry-aware fusion: $\hat{c}_k \leftarrow \hat{c}_k^{\text{E}} + \gamma \cdot \log_\mathbf{0}^c(\hat{c}_k^{\mathcal{H}})$ \Comment{Eq.~15}
+\EndFor
+\State Replace original tokens with composite tokens $\{\hat{c}_k\}$
+\State Encode simplified prompt $P' \rightarrow C'$ (entity names only)
+\State Sample $\mathbf{z}_T \sim \mathcal{N}(0, I)$
+\For{$t = T, T-1, \ldots, 1$}
+    \If{$t > T - T_{\text{tok}}$} \Comment{Token optimization phase}
+        \For{iter $= 1, \ldots, 3$}
+            \State Compute $\mathcal{L}_{\text{sem}}$ from cross-attention maps \Comment{Eq.~16--17}
+            \State Compute $\mathcal{L}_{\text{hyp}}$ from geodesic distances \Comment{Eq.~9}
+            \State Update $\hat{c}_k \leftarrow \hat{c}_k - \eta \nabla_{\hat{c}_k}(\lambda_1 \mathcal{L}_{\text{sem}} + \lambda_2 \mathcal{L}_{\text{hyp}})$ \Comment{Eq.~18}
+        \EndFor
+    \EndIf
+    \If{$t > T - T_{\text{attn}}$} \Comment{Attention refinement phase}
+        \State Compute $\mathcal{L}_{\text{ent}}$ from attention entropy \Comment{Eq.~19--20}
+        \State Update $\mathbf{z}_t \leftarrow \mathbf{z}_t - \alpha_t \nabla_{\mathbf{z}_t} \mathcal{L}_{\text{ent}}$
+    \EndIf
+    \State Replace EOT tokens with those from $C'$ (ETS)
+    \State $\mathbf{z}_{t-1} \leftarrow \text{Denoise}(\mathbf{z}_t, C_{\text{merged}}, t)$
+\EndFor
+\State $\mathbf{x}_0 \leftarrow \text{VAE\_Decode}(\mathbf{z}_0)$
+\end{algorithmic}
+\end{algorithm}
+
+% ============================================================
+\section{Extended Method Details}
+\label{sec:extended_method}
+% ============================================================
+
+\subsection{Information Coupling in CLIP Embeddings}
+
+As observed by~\cite{hu2024tome}, the semantic content of CLIP text tokens is \emph{coupled}: individual token embeddings (e.g., $c_{\text{dog}}$) already contain leaked information from their context (e.g., ``sunglasses''), and the end-of-text [EOT] tokens further compound this issue by encapsulating the entire prompt's semantics through masked self-attention. This coupling is a root cause of attribute confusion when multiple objects coexist in the prompt.
+
+Our End Token Substitution (ETS) mechanism directly addresses this coupling by replacing the [EOT] tokens from the full prompt with those encoded from a simplified prompt containing only entity names (e.g., ``a cat and a dog''), effectively removing leaked attribute information from the end-of-text representation.
+
+\subsection{Semantic Additivity Extends to Hyperbolic Space}
+
+Prior work~\cite{hu2024tome} shows that CLIP text embeddings exhibit \emph{semantic additivity}: summing ``dog'' and ``hat'' embeddings yields a token that generates dogs with hats. We extend this insight by replacing Euclidean addition with M\"obius addition (Eq.~4 in the main paper), obtaining composite tokens that combine semantics \emph{and} preserve hierarchical proximity. As demonstrated in Sec.~4.5 of the main paper, this leads to more accurate binding, especially for prompts with deep dependency chains (e.g., ``a dog wearing a red hat with a golden buckle'').
+
+\subsection{Boundary Amplification in High Dimensions}
+
+We provide a formal justification for why hyperbolic geometry helps even in $\mathbb{R}^{2048}$. For two points $\mathbf{x}, \mathbf{y}$ near the boundary of the Poincar\'e ball with $\|\mathbf{x}\|, \|\mathbf{y}\| \to 1/\sqrt{c}$:
+
+\begin{equation}
+D_{\text{hyp}}(\mathbf{x}, \mathbf{y}) \approx 2 \log \frac{2\|\mathbf{x} - \mathbf{y}\|}{(1 - c\|\mathbf{x}\|^2)(1 - c\|\mathbf{y}\|^2)},
+\label{eq:boundary}
+\end{equation}
+
+which diverges logarithmically as the conformal factors $\lambda_c(\mathbf{x}) = 2/(1-c\|\mathbf{x}\|^2)$ grow. This ``boundary amplification'' effect operates regardless of the ambient dimensionality and provides a geometric inductive bias that is absent in Euclidean space. In practice, leaf-node tokens (attributes like ``red hat'') that are assigned to \emph{different} parent entities are pushed exponentially further apart in geodesic distance, even when their Euclidean distances remain similar.
+
+% ============================================================
+\section{Implementation Details}
+\label{sec:impl_details}
+% ============================================================
+
+\setcounter{table}{0}
+
+We provide the complete implementation details for reproducibility.
+
+\paragraph{Syntactic Parsing.} We use SpaCy~\cite{honnibal2020spacy} (model: \texttt{en\_core\_web\_trf}) for dependency parsing to extract entity--attribute pairs. The parser identifies noun chunks and their modifiers (amod, nmod, compound, npadvmod, advmod, acomp) to construct the set of entities $\{(n_k, a_k)\}_{k=1}^K$.
+
+\paragraph{Poincar\'e Ball Parameters.} The curvature is fixed at $c=1.0$. Before the exponential map, all CLIP embeddings are normalized to unit norm ($\tilde{C} = C / \|C\|_2$) to prevent tanh saturation---since raw CLIP embeddings have norms in [15, 50], direct application would cause numerical overflow.
+
+\paragraph{Multi-Head Attention.} We use 8 attention heads with $d=2048$. The projection matrices are fixed as identity matrices ($W_Q = W_K = W_V = I$), making this entirely parameter-free.
+
+\paragraph{Fusion Parameters.} The aggregation weights are $\alpha = 1.1$ (noun), $\beta = 1.2$ (attribute). The hyperbolic--Euclidean fusion weight is $\gamma = 0.1$.
+
+\paragraph{Denoising Configuration.} We run 50 denoising steps with classifier-free guidance scale 7.5 (SDXL) or 3.5 (FLUX.1). Composite token optimization runs for the first 5 steps with 3 gradient iterations per step (learning rate $\eta = 10000$). Attention refinement applies $[4, 4]$ iterations during the first 5 steps.
+
+\paragraph{Loss Weights.} Semantic binding loss weight $\lambda_1 = 1.0$, hyperbolic contrastive loss weight $\lambda_2 = 10^{-6}$, contrastive temperature $\tau = 0.07$.
+
+\paragraph{Evaluation Seeds.} All experiments use 5 random seeds (42, 123, 456, 789, 1024). We report mean $\pm$ standard deviation.
+
+\paragraph{Hardware.} Experiments are conducted on NVIDIA H200 (141 GB) GPUs. Single-image generation takes 12.8--16.4 seconds depending on entity count (Table~7 in the main paper).
+
+% ============================================================
+\section{Hyperparameter Sensitivity}
+\label{sec:hyperparam}
+% ============================================================
+
+\setcounter{table}{0}
+
+We systematically evaluate the sensitivity of four key hyperparameters.
+
+\paragraph{Fusion weight $\gamma$.} We sweep $\gamma \in \{0.01, 0.05, 0.1, 0.2, 0.5, 1.0\}$ (Table~\ref{tab:gamma}). Performance peaks at $\gamma=0.1$ for color and texture, and at $\gamma=0.2$ for shape. Beyond $\gamma=0.5$, performance degrades as the hyperbolic correction overwhelms the Euclidean component, causing numerical instability in cross-attention computation. We set $\gamma=0.1$ as a balanced default. Notably, the \emph{effective} contribution of the hyperbolic branch is larger than $\gamma$ suggests: measuring the $\ell_2$ norm ratio $\|\gamma \cdot \log_0^c(\hat{c}_k^{\text{H}})\| / \|\hat{c}_k^{\text{E}}\|$ across all tokens and prompts, we find a mean effective ratio of $0.23 \pm 0.08$, because the logarithmic map amplifies norms for tokens near the Poincar\'e boundary.
+
+\begin{table}[t]
+\centering
+\caption{Sensitivity to fusion weight $\gamma$ (BLIP-VQA $\uparrow$, T2I-CompBench, SDXL).}
+\label{tab:gamma}
+\begin{tabular}{l cccccc}
+\toprule
+$\gamma$ & 0.01 & 0.05 & \textbf{0.1} & 0.2 & 0.5 & 1.0 \\
+\midrule
+Color  & .762 & .778 & \textbf{.791} & .785 & .764 & .721 \\
+Texture & .665 & .669 & \textbf{.673} & .671 & .658 & .634 \\
+Shape  & .547 & .583 & .615 & \textbf{.622} & .608 & .571 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Curvature $c$.} We test $c \in \{0.1, 0.5, 1.0, 2.0, 5.0\}$. Performance is stable for $c \in [0.5, 2.0]$, with mild degradation at extreme values. Higher $c$ compresses the Poincar\'e ball, causing numerical precision issues; lower $c$ approaches Euclidean geometry, reducing the hyperbolic benefit. We set $c=1.0$.
+
+\paragraph{Contrastive temperature $\tau$.} We sweep $\tau \in \{0.01, 0.03, 0.07, 0.1, 0.3\}$. Smaller $\tau$ increases the sharpness of the contrastive objective; $\tau=0.07$ provides the best balance. Extremely small $\tau$ ($\leq 0.01$) causes training instability.
+
+\paragraph{Loss weight $\lambda_2$.} We test $\lambda_2 \in \{10^{-8}, 10^{-7}, 10^{-6}, 10^{-5}, 10^{-4}\}$. The optimal range is $[10^{-7}, 10^{-5}]$; larger values cause the contrastive loss to dominate and distort the composite tokens.
+
+% ============================================================
+\section{Extended Ablation Analysis}
+\label{sec:extended_ablation}
+% ============================================================
+
+Building on the ablation study in Table~6 of the main paper, we provide detailed analysis of each component's contribution:
+
+\begin{enumerate}
+\item \textbf{Token merging provides a strong foundation.} Config.~B (Euclidean merging only) already improves upon the SDXL baseline across all subsets, confirming the effectiveness of composite tokens~\cite{hu2024tome}.
+
+\item \textbf{Hyperbolic fusion is critical for shape binding.} Comparing E with B, adding the hyperbolic branch improves shape from 0.544 to 0.568 (+2.4\%). Comparing F with D, shape binding jumps from 0.532 to 0.593 (+6.1\%).
+
+\item \textbf{The hyperbolic branch is not a generic perturbation.} Config.~G replaces the hyperbolic branch with a random orthogonal projection of the same dimensionality (generating a correction term $\gamma \cdot R\tilde{C}$ where $R$ is a random orthogonal matrix, $R^\top R = I$). This ``random projection control'' achieves only marginal improvement over ToMe (shape: 0.540 vs.\ 0.532), far below the hyperbolic variant (0.615). This confirms that the gains from hyperbolic geometry are specifically attributable to the hierarchical inductive bias of the Poincar\'e ball.
+
+\item \textbf{Entropy loss drives color binding but can slightly hurt shape.} Adding $\mathcal{L}_{\text{ent}}$ (C vs.\ B) yields the largest single-component gain for color binding (+9.5\%), but shape decreases slightly (0.544$\to$0.531). This trade-off is resolved by our hyperbolic fusion.
+
+\item \textbf{Hyperbolic contrastive loss provides consistent gains.} Comparing the full model with F, $\mathcal{L}_{\text{hyp}}$ improves color (+1.7\%), texture (+0.4\%), and shape (+2.2\%), demonstrating that geodesic separation complements all other components.
+
+\item \textbf{All components are complementary.} The full GeoBind achieves the best performance on every metric. The cumulative gain over ToMe (D) is +3.6/+0.9/+8.3 on color/texture/shape.
+\end{enumerate}
+
+% ============================================================
+\section{Extended Qualitative Analysis}
+\label{sec:extended_qual}
+% ============================================================
+
+Following~\cite{rassin2023syngen}, we categorize failure cases of baseline methods into three types:
+\begin{itemize}
+\item \textbf{Semantic leak in prompt}: an attribute is incorrectly assigned to the wrong entity within the prompt (e.g., ``red'' leaking from ``pear'' to ``apple'').
+\item \textbf{Semantic leak out of prompt}: an attribute appears on background elements or unmentioned objects.
+\item \textbf{Attribute neglect}: a specified attribute is completely absent from the generated image.
+\end{itemize}
+
+Our analysis of 200 GOB-Bench images shows that GeoBind reduces ``semantic leak in prompt'' errors by 73\% compared to the SDXL baseline and by 42\% compared to ToMe. The improvement is most pronounced for prompts with 3+ entities, where the hyperbolic contrastive loss explicitly separates all entity embeddings via pairwise geodesic distances.
+
+% ============================================================
+\section{Failure Cases}
+\label{sec:failures}
+% ============================================================
+
+We identify three main failure modes of GeoBind:
+
+\begin{enumerate}
+\item \textbf{SpaCy parsing errors.} Highly informal or grammatically unusual prompts (e.g., ``angry red car next to happy blue truck both racing'') may yield incorrect dependency parses, leading to wrong entity--attribute groupings. This could be mitigated by using LLM-based parsing in future work.
+
+\item \textbf{Extreme entity count.} With $K \geq 6$ entities, the optimization landscape becomes challenging and runtime increases significantly ($>$25\,s). The pairwise contrastive loss scales as $O(K^2)$, making both computation and gradient estimation noisy for large $K$.
+
+\item \textbf{Rare attribute combinations.} Attributes that rarely co-occur in CLIP's training data (e.g., ``pentagonal cat'') cannot be reliably bound regardless of geometric approach, as the base model lacks the visual concept. This is a limitation of the underlying T2I model rather than our binding method.
+\end{enumerate}
+
+% ============================================================
+\section{Limitations and Future Work}
+\label{sec:limitations}
+% ============================================================
+
+Our method relies on SpaCy for syntactic parsing, which may fail on informal or non-English text; extending to multilingual settings requires language-specific parsing and multilingual encoders. The curvature $c$ is currently fixed; adaptive curvature selection based on prompt complexity could further improve performance. With $K \geq 6$ entities, optimization becomes challenging. We believe the integration of non-Euclidean geometry into generative models opens a promising direction for improving compositional understanding in T2I systems.
+
+% ============================================================
+\section{Additional Related Work: Compositional T2I Benchmarks}
+\label{sec:related_benchmarks}
+% ============================================================
+
+T2I-CompBench~\cite{huang2023t2icompbench} provides a systematic evaluation suite for compositional generation, covering color, shape, texture, spatial, and non-spatial relationships. DPG-Bench~\cite{hu2024ella} evaluates dense prompt understanding with long descriptions. GenAI-Bench~\cite{li2024genaibench} assesses compositional alignment across diverse categories. ImageReward~\cite{xu2024imagereward} offers a learned human-preference metric. We complement these with our proposed GOB-Bench (Sec.~4.1 of the main paper) to evaluate object binding, a critical dimension not directly addressed by existing benchmarks.
+
+% ============================================================
+\section{GOB-Bench Dataset Details}
+\label{sec:gobbench}
+% ============================================================
+
+\setcounter{table}{0}
+
+GOB-Bench (GeoBind Object Binding Benchmark) contains 200 \emph{object binding} prompts spanning four difficulty levels, designed to systematically evaluate whether each object in a prompt is correctly associated with its sub-objects and accessories (e.g., ``hat'' should belong to ``dog,'' not ``cat'').
+
+\begin{table}[t]
+\centering
+\caption{GOB-Bench difficulty level statistics.}
+\label{tab:gob_stats}
+\begin{tabular}{l c c c}
+\toprule
+Level & \# Objects & \# Sub-objs/Obj & \# Prompts \\
+\midrule
+Easy     & 2 & 1     & 60 \\
+Medium   & 2 & 2     & 60 \\
+Hard     & 3 & 1--2  & 40 \\
+Complex  & 4+ & 1--2  & 40 \\
+\midrule
+\textbf{Total} & --- & --- & \textbf{200} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\paragraph{Prompt Design Principles.}
+Object binding differs from attribute binding (tested by T2I-CompBench) in that each object must be correctly linked to its sub-objects or accessories, rather than adjective modifiers.
+\begin{enumerate}
+\item \textbf{Template structure}: all prompts follow the ``a [object] with/wearing [item(s)]'' pattern, which creates clear object--sub-object ownership relationships. Example: ``a cat with sunglasses and a dog with a hat.''
+\item \textbf{Entity diversity}: objects span animals, people, occupations, and fictional characters to avoid domain bias.
+\item \textbf{Sub-object diversity}: sub-objects include accessories (sunglasses, hat, crown, scarf), tools (wand, sword, brush), and wearable items (cape, vest, helmet) that can plausibly belong to the associated object.
+\item \textbf{Difficulty calibration}: Easy (2 objects $\times$ 1 item), Medium (2 objects $\times$ 2 items), Hard (3 objects $\times$ 1--2 items), Complex (4+ objects $\times$ 1--2 items). Each level increases the binding ambiguity by adding more competing entities.
+\item \textbf{Template-based parsing}: since object binding prompts use ``with/wearing'' (prepositional phrases, not adjective modifiers), we use template-based parsing rather than SpaCy dependency parsing. This ensures deterministic and correct entity--sub-object grouping for all 200 prompts.
+\end{enumerate}
+
+\paragraph{Evaluation Protocol.}
+Each prompt is evaluated by three independent judges: GPT-4o, Qwen2-VL, and human annotators (3 annotators per image, majority vote). For automated judges, we use the following scoring rubric:
+\begin{itemize}
+\item \textbf{100}: All objects present with all sub-objects correctly bound to their owners.
+\item \textbf{75}: All objects present, but 1 sub-object incorrectly assigned (e.g., hat on cat instead of dog).
+\item \textbf{50}: All objects present, but 2+ sub-objects incorrectly assigned.
+\item \textbf{25}: One or more objects missing from the image.
+\item \textbf{0}: Image does not match the prompt at all.
+\end{itemize}
+The inter-evaluator agreement (Krippendorff's $\alpha = 0.83$) indicates strong consistency across the three judges.
+
+The complete prompt list is provided in the supplementary file \texttt{gob\_bench\_prompts.txt}.
+
+% ============================================================
+\section{Training and Computational Details}
+\label{sec:training}
+% ============================================================
+
+GeoBind is a \textbf{training-free} method: no model weights are updated. All optimization occurs at inference time on the token embedding space. The key computational aspects are:
+
+\begin{itemize}
+\item \textbf{No training data required}: GeoBind operates directly on the pre-trained SDXL/SD3/FLUX.1 models without any fine-tuning data.
+\item \textbf{No learnable parameters}: All projection matrices are identity ($W_Q = W_K = W_V = I$), all geometric operations (exponential map, M\"obius addition, geodesic distance) are closed-form.
+\item \textbf{Inference-time optimization}: During the first 5 denoising steps (out of 50 total), composite tokens are iteratively refined via gradient descent on $\mathcal{L}_{\text{sem}} + \lambda_2 \mathcal{L}_{\text{hyp}}$, and attention maps are refined via $\mathcal{L}_{\text{ent}}$.
+\item \textbf{Runtime overhead}: Compared to standard SDXL generation ($\sim$8.2\,s), GeoBind adds $\sim$4.6--8.2\,s depending on entity count ($K=2$ to $K=5$), primarily from the additional UNet forward passes required for $\mathcal{L}_{\text{sem}}$ computation.
+\item \textbf{Memory}: Peak GPU memory usage is $\sim$18\,GB (SDXL) on H200, dominated by the base model weights. GeoBind's geometric operations add negligible memory overhead ($<$100\,MB).
+\end{itemize}
+
+% ============================================================
+\section{Code Structure}
+\label{sec:code}
+% ============================================================
+
+The submitted code contains the following key files:
+
+\paragraph{Core Pipeline.}
+\begin{itemize}
+\item \texttt{pipe\_geobind.py}: The main GeoBind pipeline, extending \texttt{StableDiffusionXLPipeline} from diffusers. Implements composite token merging (Sec.~3.3), semantic binding loss (Sec.~3.4.1), hyperbolic contrastive loss (Sec.~3.4.2), and entropy-guided attention refinement (Sec.~3.5).
+\item \texttt{pipe\_tome.py}: ToMe baseline pipeline (Euclidean-only token merging) for comparison.
+\item \texttt{prompt\_utils.py}: SpaCy-based prompt parsing for extracting entity--attribute pairs and aligning with CLIP tokenizer wordpieces.
+\item \texttt{utils/hyperbolic\_utils.py}: Hyperbolic geometry operations (exponential/logarithmic maps, M\"obius addition, geodesic distance, Poincar\'e ball projection) and the \texttt{TokenMergerWithAttnHyperspace} module.
+\item \texttt{utils/ptp\_utils.py}: Prompt-to-prompt attention utilities for storing and aggregating cross-attention maps.
+\end{itemize}
+
+\paragraph{Experiment Scripts.}
+\begin{itemize}
+\item \texttt{run\_geobind.py}: Generate images on T2I-CompBench attribute binding subsets (color, shape, texture).
+\item \texttt{run\_compbench\_eval.py}: Full T2I-CompBench evaluation pipeline (generation + BLIP-VQA scoring) for all methods.
+\item \texttt{run\_object\_binding\_generate.py}: GOB-Bench image generation for all 200 prompts across 4 difficulty levels.
+\item \texttt{run\_object\_binding\_eval.py}: GOB-Bench evaluation with GPT-4o and Qwen2-VL judges, per-difficulty scoring.
+\item \texttt{run\_demo.py}: Interactive demo for comparing SDXL, ToMe, and GeoBind on custom prompts.
+\end{itemize}
+
+\paragraph{Evaluation Scripts.}
+\begin{itemize}
+\item \texttt{eval\_image\_reward.py}: ImageReward~\cite{xu2024imagereward} scoring for generated images.
+\item \texttt{eval\_clip\_score.py}: CLIP Score (ViT-L/14) evaluation for text-image alignment.
+\item \texttt{eval\_gromov\_hyperbolicity.py}: Gromov $\delta$-hyperbolicity analysis of CLIP token embeddings (Table~1 in the main paper), verifying the intrinsic tree-like structure that motivates our hyperbolic approach.
+\end{itemize}
+
+\paragraph{Data.}
+\begin{itemize}
+\item \texttt{data/t2i\_compbench/}: T2I-CompBench prompt files for color, shape, and texture binding evaluation (300 prompts each).
+\item \texttt{supplementary/gob\_bench\_prompts.txt}: Complete GOB-Bench prompt list (200 prompts, 4 difficulty levels).
+\end{itemize}
+
+Evaluation on T2I-CompBench uses the official evaluation code from~\cite{huang2023t2icompbench}. GOB-Bench evaluation uses GPT-4o and Qwen2-VL APIs as described in Sec.~4.1.
+
+% ============================================================
+
+\bibliographystyle{ACM-Reference-Format}
+
+\begin{thebibliography}{10}
+
+\bibitem{hu2024tome}
+T.~Hu et~al.
+\newblock Token Merging for Training-Free Semantic Binding in Text-to-Image Synthesis.
+\newblock {\em NeurIPS}, 2024.
+
+\bibitem{rassin2023syngen}
+R.~Rassin et~al.
+\newblock Linguistic Binding in Diffusion Models: Enhancing Attribute Correspondence through Attention Map Alignment.
+\newblock {\em NeurIPS}, 2023.
+
+\bibitem{honnibal2020spacy}
+M.~Honnibal et~al.
+\newblock spaCy: Industrial-strength Natural Language Processing in Python.
+\newblock 2020.
+
+\bibitem{huang2023t2icompbench}
+K.~Huang et~al.
+\newblock T2I-CompBench: A Comprehensive Benchmark for Open-World Compositional Text-to-Image Generation.
+\newblock {\em NeurIPS}, 2023.
+
+\bibitem{hu2024ella}
+X.~Hu et~al.
+\newblock ELLA: Equip Diffusion Models with LLM for Enhanced Semantic Alignment.
+\newblock {\em arXiv:2403.05135}, 2024.
+
+\bibitem{li2024genaibench}
+B.~Li et~al.
+\newblock GenAI-Bench: Evaluating and Improving Compositional Text-to-Visual Generation.
+\newblock {\em arXiv:2406.13743}, 2024.
+
+\bibitem{xu2024imagereward}
+J.~Xu et~al.
+\newblock ImageReward: Learning and Evaluating Human Preferences for Text-to-Image Generation.
+\newblock {\em NeurIPS}, 2024.
+
+\end{thebibliography}
+
+\end{document}

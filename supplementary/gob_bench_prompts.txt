@@ -1,0 +1,227 @@
+# GOB-Bench: GeoBind Object Binding Benchmark
+# 200 object binding prompts across 4 difficulty levels
+# Format: [LEVEL] prompt
+#
+# Object binding: each object has sub-objects/accessories that must
+# be correctly associated (e.g., "hat" belongs to "dog", not "cat")
+#
+# Easy (60 prompts): 2 objects, 1 sub-object each
+# Medium (60 prompts): 2 objects, 2 sub-objects each
+# Hard (40 prompts): 3 objects, 1-2 sub-objects each
+# Complex (40 prompts): 4+ objects with sub-objects
+
+# ============================================================
+# EASY (2 objects, 1 sub-object each) — 60 prompts
+# ============================================================
+[Easy] a cat with sunglasses and a dog with a hat
+[Easy] a dog with a scarf and a cat with a collar
+[Easy] a boy with glasses and a girl with earrings
+[Easy] a man with a hat and a woman with a necklace
+[Easy] a cat with a bow tie and a dog with a bandana
+[Easy] a fox with sunglasses and a deer with a crown
+[Easy] a bear with a hat and a rabbit with a scarf
+[Easy] a tiger with glasses and a lion with a crown
+[Easy] a boy with a cape and a girl with a tiara
+[Easy] a lion with a crown and a sheep with a scarf
+[Easy] a cat with a bell and a rabbit with glasses
+[Easy] a man with a watch and a woman with a bracelet
+[Easy] a owl with glasses and a parrot with a hat
+[Easy] a monkey with a hat and a elephant with glasses
+[Easy] a girl with a necklace and a boy with a watch
+[Easy] a penguin with a scarf and a panda with a hat
+[Easy] a horse with a mask and a dog with a cape
+[Easy] a wolf with a crown and a fox with a scarf
+[Easy] a man with a tie and a woman with a hat
+[Easy] a parrot with a crown and a owl with a monocle
+[Easy] a cat with a cape and a dog with a vest
+[Easy] a bear with sunglasses and a deer with a hat
+[Easy] a girl with a headband and a boy with glasses
+[Easy] a tiger with a crown and a bear with a bow tie
+[Easy] a rabbit with a hat and a squirrel with a scarf
+[Easy] a woman with glasses and a man with a scarf
+[Easy] a dog with a tie and a cat with a collar
+[Easy] a elephant with a hat and a monkey with sunglasses
+[Easy] a fox with glasses and a wolf with a hat
+[Easy] a boy with a helmet and a girl with a crown
+[Easy] a duck with a hat and a penguin with a bow tie
+[Easy] a cat with a crown and a dog with a necklace
+[Easy] a man with a helmet and a woman with glasses
+[Easy] a horse with a hat and a dog with a vest
+[Easy] a panda with sunglasses and a bear with a hat
+[Easy] a girl with a hat and a boy with a scarf
+[Easy] a lion with a hat and a tiger with a scarf
+[Easy] a cat with glasses and a rabbit with a bow tie
+[Easy] a woman with a necklace and a girl with a ring
+[Easy] a owl with a hat and a parrot with a scarf
+[Easy] a man with sunglasses and a boy with a hat
+[Easy] a dog with a crown and a cat with a cape
+[Easy] a deer with glasses and a fox with a hat
+[Easy] a bear with a scarf and a wolf with glasses
+[Easy] a squirrel with a hat and a monkey with glasses
+[Easy] a woman with a hat and a man with a tie
+[Easy] a corgi with a hat and a cat with sunglasses
+[Easy] a tiger with a hat and a bear with a crown
+[Easy] a girl with glasses and a boy with a bow tie
+[Easy] a elephant with a crown and a horse with a hat
+[Easy] a mouse with glasses and a hamster with a hat
+[Easy] a frog with a crown and a turtle with glasses
+[Easy] a cow with a bell and a pig with a scarf
+[Easy] a giraffe with sunglasses and a zebra with a hat
+[Easy] a koala with a scarf and a raccoon with glasses
+[Easy] a seal with a hat and a otter with a bow tie
+[Easy] a chicken with a hat and a duck with a scarf
+[Easy] a dolphin with sunglasses and a whale with a hat
+[Easy] a goat with a bell and a sheep with a ribbon
+[Easy] a husky with a bandana and a poodle with a bow
+
+# ============================================================
+# MEDIUM (2 objects, 2 sub-objects each) — 60 prompts
+# ============================================================
+[Medium] a cat with sunglasses and a scarf, and a dog with a hat and a tie
+[Medium] a boy with glasses and a watch, and a girl with earrings and a necklace
+[Medium] a man with a hat and a briefcase, and a woman with a necklace and a purse
+[Medium] a dog with a collar and a cape, and a cat with a bow tie and glasses
+[Medium] a lion with a crown and a cape, and a tiger with glasses and a scarf
+[Medium] a fox with sunglasses and a hat, and a rabbit with a scarf and a bell
+[Medium] a bear with a hat and a vest, and a wolf with a scarf and glasses
+[Medium] a monkey with a hat and sunglasses, and a elephant with glasses and a scarf
+[Medium] a boy with a helmet and a cape, and a girl with a tiara and a wand
+[Medium] a penguin with a hat and a bow tie, and a panda with sunglasses and a scarf
+[Medium] a man with a tie and a watch, and a woman with a hat and earrings
+[Medium] a cat with a bell and a ribbon, and a dog with a bandana and a collar
+[Medium] a owl with glasses and a scarf, and a parrot with a crown and a necklace
+[Medium] a horse with a mask and a cape, and a deer with a crown and a bell
+[Medium] a girl with a headband and a bracelet, and a boy with a hat and a backpack
+[Medium] a tiger with a crown and a vest, and a lion with a scarf and a medal
+[Medium] a duck with a hat and a bow tie, and a swan with a crown and a necklace
+[Medium] a woman with glasses and a scarf, and a man with a hat and a cane
+[Medium] a cat with a crown and a cape, and a rabbit with glasses and a hat
+[Medium] a dog with sunglasses and a bandana, and a fox with a scarf and glasses
+[Medium] a bear with a hat and a backpack, and a panda with a scarf and sunglasses
+[Medium] a squirrel with a hat and a acorn, and a chipmunk with a scarf and a nut
+[Medium] a man with sunglasses and a guitar, and a woman with a hat and a violin
+[Medium] a boy with a cape and a shield, and a girl with a crown and a scepter
+[Medium] a parrot with a hat and a ring, and a owl with glasses and a book
+[Medium] a wolf with a crown and a cape, and a fox with a mask and a hat
+[Medium] a cow with a bell and a hat, and a pig with a scarf and a bow
+[Medium] a horse with a saddle and a hat, and a donkey with a scarf and a bell
+[Medium] a cat with a hat and a wand, and a dog with a cape and a mask
+[Medium] a giraffe with sunglasses and a scarf, and a zebra with a hat and a bow tie
+[Medium] a man with a monocle and a top hat, and a woman with a fan and a tiara
+[Medium] a frog with a crown and a cape, and a turtle with glasses and a hat
+[Medium] a boy with a backpack and a cap, and a girl with a purse and sunglasses
+[Medium] a elephant with a hat and a scarf, and a hippo with sunglasses and a necklace
+[Medium] a penguin with a scarf and a hat, and a seal with sunglasses and a ball
+[Medium] a koala with a hat and a scarf, and a kangaroo with sunglasses and a pouch
+[Medium] a chicken with a hat and a necklace, and a rooster with a crown and a cape
+[Medium] a mouse with glasses and a hat, and a hamster with a bow tie and a wheel
+[Medium] a man with a badge and a hat, and a woman with a scarf and a brooch
+[Medium] a dog with a hat and a leash, and a cat with a collar and a bell
+[Medium] a lion with a mane ribbon and a crown, and a cheetah with sunglasses and a collar
+[Medium] a robot with a hat and glasses, and an astronaut with a badge and a helmet
+[Medium] a pirate with an eyepatch and a hat, and a knight with a shield and a helmet
+[Medium] a chef with a hat and an apron, and a waiter with a bow tie and a vest
+[Medium] a wizard with a hat and a wand, and a witch with a broom and a hat
+[Medium] a king with a crown and a scepter, and a queen with a tiara and a fan
+[Medium] a cowboy with a hat and a lasso, and a sheriff with a badge and a hat
+[Medium] a ninja with a mask and a sword, and a samurai with a helmet and a katana
+[Medium] a clown with a hat and a nose, and a juggler with balls and a hat
+[Medium] a sailor with a hat and a telescope, and a captain with a cap and a compass
+[Medium] a doctor with a stethoscope and glasses, and a nurse with a cap and a clipboard
+[Medium] a teacher with glasses and a book, and a student with a backpack and a pencil
+[Medium] a firefighter with a helmet and an axe, and a police officer with a badge and a hat
+[Medium] a painter with a beret and a brush, and a sculptor with an apron and a chisel
+[Medium] a musician with a guitar and a hat, and a singer with a microphone and earrings
+[Medium] a photographer with a camera and a hat, and a reporter with a microphone and a notebook
+[Medium] a gardener with a hat and gloves, and a farmer with a pitchfork and boots
+[Medium] a baker with a hat and a rolling pin, and a butcher with an apron and a knife
+[Medium] a dancer with a tiara and ballet shoes, and a gymnast with a ribbon and a leotard
+[Medium] a fisherman with a hat and a rod, and a hunter with a cap and a bow
+
+# ============================================================
+# HARD (3 objects, 1-2 sub-objects each) — 40 prompts
+# ============================================================
+[Hard] a cat with sunglasses, a dog with a hat, and a rabbit with a scarf
+[Hard] a boy with glasses, a girl with earrings, and a man with a hat
+[Hard] a lion with a crown, a tiger with glasses, and a bear with a scarf
+[Hard] a fox with a hat, a wolf with a cape, and a deer with a crown
+[Hard] a penguin with a bow tie, a panda with sunglasses, and a koala with a hat
+[Hard] a monkey with a hat, a elephant with glasses, and a giraffe with a scarf
+[Hard] a man with a tie, a woman with a necklace, and a boy with a cap
+[Hard] a owl with glasses, a parrot with a crown, and a eagle with a hat
+[Hard] a cat with a bell and a ribbon, a dog with a bandana and a collar, and a rabbit with glasses and a hat
+[Hard] a horse with a hat, a cow with a bell, and a pig with a scarf
+[Hard] a frog with a crown, a turtle with glasses, and a snake with a hat
+[Hard] a bear with a vest and a hat, a wolf with a scarf and glasses, and a fox with a crown and a cape
+[Hard] a chef with a hat, a waiter with a bow tie, and a bartender with an apron
+[Hard] a king with a crown, a queen with a tiara, and a knight with a helmet
+[Hard] a pirate with an eyepatch, a captain with a hat, and a sailor with a scarf
+[Hard] a wizard with a wand, a witch with a broom, and a fairy with wings
+[Hard] a dog with sunglasses, a cat with a top hat, and a hamster with a bow tie
+[Hard] a man with a monocle, a woman with a fan, and a girl with a parasol
+[Hard] a tiger with a crown and a cape, a lion with glasses and a medal, and a panther with a scarf and a hat
+[Hard] a cowboy with a hat, a sheriff with a badge, and a outlaw with a mask
+[Hard] a robot with glasses, a alien with a hat, and a astronaut with a helmet
+[Hard] a duck with a sailor hat, a goose with a scarf, and a swan with a crown
+[Hard] a mouse with a hat, a rat with glasses, and a hamster with a bow tie
+[Hard] a boy with a cape and a mask, a girl with a tiara and a wand, and a man with a hat and glasses
+[Hard] a doctor with a stethoscope, a nurse with a cap, and a surgeon with a mask
+[Hard] a musician with a guitar, a drummer with sticks, and a singer with a microphone
+[Hard] a cat with a scarf and a bell, a dog with a hat and a leash, and a bird with a crown and a ring
+[Hard] a firefighter with a helmet, a police officer with a badge, and a paramedic with a bag
+[Hard] a painter with a beret, a sculptor with an apron, and a writer with glasses
+[Hard] a monkey with sunglasses and a hat, a parrot with a crown and a ring, and a toucan with a bow tie and a scarf
+[Hard] a wolf with a cape, a bear with a crown, and a eagle with a hat
+[Hard] a gardener with gloves, a farmer with a hat, and a lumberjack with an axe
+[Hard] a ballerina with a tiara, a gymnast with a ribbon, and a figure skater with a costume
+[Hard] a penguin with a top hat, a seal with a ball, and a walrus with a monocle
+[Hard] a rabbit with a hat and a watch, a cat with a bow tie and a cane, and a mouse with glasses and a book
+[Hard] a clown with a red nose, a magician with a top hat, and a juggler with balls
+[Hard] a samurai with a katana, a ninja with a mask, and a monk with a staff
+[Hard] a elephant with a crown and a cape, a hippo with sunglasses and a necklace, and a rhino with a hat and a vest
+[Hard] a fisherman with a hat, a sailor with a telescope, and a diver with goggles
+[Hard] a baker with a hat, a chef with an apron, and a cook with a spoon
+
+# ============================================================
+# COMPLEX (4+ objects with sub-objects) — 40 prompts
+# ============================================================
+[Complex] a cat with sunglasses, a dog with a hat, a rabbit with a scarf, and a hamster with a bow tie
+[Complex] a boy with glasses, a girl with earrings, a man with a hat, and a woman with a necklace
+[Complex] a lion with a crown, a tiger with glasses, a bear with a scarf, and a wolf with a cape
+[Complex] a king with a crown, a queen with a tiara, a prince with a cape, and a princess with a wand
+[Complex] a chef with a hat, a waiter with a bow tie, a bartender with an apron, and a baker with a rolling pin
+[Complex] a pirate with an eyepatch, a captain with a hat, a sailor with a scarf, and a navigator with a compass
+[Complex] a cat with a bell and a ribbon, a dog with a bandana and a collar, a rabbit with glasses and a hat, and a bird with a crown and a ring
+[Complex] a wizard with a hat and a wand, a witch with a broom and a hat, a fairy with wings and a tiara, and a elf with a bow and a hat
+[Complex] a monkey with a hat, a elephant with glasses, a giraffe with a scarf, a zebra with a bow tie, and a hippo with a hat
+[Complex] a doctor with a stethoscope, a nurse with a cap, a surgeon with a mask, and a dentist with a mirror
+[Complex] a cowboy with a hat and a lasso, a sheriff with a badge and a hat, a outlaw with a mask and a gun, and a rancher with boots and a rope
+[Complex] a penguin with a top hat, a seal with sunglasses, a walrus with a monocle, and a otter with a bow tie
+[Complex] a firefighter with a helmet, a police officer with a badge, a paramedic with a bag, and a lifeguard with a whistle
+[Complex] a cat with sunglasses and a scarf, a dog with a hat and a tie, a bird with a crown and a ring, and a fish with a bow tie and a hat
+[Complex] a musician with a guitar, a drummer with sticks, a singer with a microphone, a bassist with a bass, and a pianist with a hat
+[Complex] a robot with glasses and a hat, a alien with a helmet and a ray gun, a astronaut with a badge and a suit, and a cyborg with a visor and a cape
+[Complex] a painter with a beret and a brush, a sculptor with an apron and a chisel, a writer with glasses and a pen, and a photographer with a camera and a hat
+[Complex] a bear with a vest and a hat, a fox with a scarf and a bag, a rabbit with a hat and a watch, and a owl with glasses and a book
+[Complex] a dancer with a tiara, a gymnast with a ribbon, a figure skater with a costume, and a swimmer with goggles
+[Complex] a samurai with a katana and a helmet, a ninja with a mask and a sword, a monk with a staff and a robe, and a warrior with a shield and a cape
+[Complex] a man with a top hat and a cane, a woman with a parasol and a fan, a boy with a cap and a ball, and a girl with a bow and a doll
+[Complex] a cat with a wizard hat and a cape, a dog with a pirate hat and an eyepatch, a rabbit with a crown and a scepter, and a hamster with a helmet and a sword
+[Complex] a teacher with glasses and a book, a student with a backpack and a pencil, a principal with a badge and a tie, and a janitor with a broom and a hat
+[Complex] a lion with a crown and a throne, a eagle with a helmet and a shield, a dragon with a cape and a sword, and a unicorn with a tiara and a wand
+[Complex] a fisherman with a hat and a rod, a hunter with a cap and a bow, a camper with a backpack and a hat, and a hiker with boots and a stick
+[Complex] a gardener with a hat and gloves, a farmer with a pitchfork and boots, a lumberjack with an axe and a hat, and a miner with a helmet and a pickaxe
+[Complex] a clown with a red nose and a hat, a magician with a top hat and a wand, a juggler with balls and a hat, and a acrobat with a costume and a hoop
+[Complex] a penguin with a scarf and a hat, a polar bear with sunglasses and a vest, a seal with a ball and a bow tie, and a arctic fox with a crown and a cape
+[Complex] a mouse with a hat and glasses, a cat with a collar and a bell, a dog with a bandana and a leash, a bird with a bow and a ring, and a fish with a crown
+[Complex] a knight with a helmet and a shield, a archer with a bow and a hat, a mage with a staff and a robe, and a healer with a bag and a pendant
+[Complex] a chef with a tall hat and an apron, a sushi master with a headband and a knife, a baker with a cap and a whisk, and a pizzaiolo with a hat and a paddle
+[Complex] a cat with a sailor hat and a telescope, a dog with a captain hat and a compass, a parrot with an eyepatch and a ring, and a monkey with a bandana and a map
+[Complex] a detective with a magnifying glass and a hat, a spy with sunglasses and a briefcase, a police officer with a badge and a hat, and a guard with a uniform and a radio
+[Complex] a ballerina with a tutu and a tiara, a flamenco dancer with a fan and a flower, a tap dancer with a hat and a cane, and a hip hop dancer with a cap and headphones
+[Complex] a astronaut with a helmet and a flag, a pilot with a cap and a badge, a sailor with a hat and a compass, and a submarine captain with a cap and a periscope
+[Complex] a viking with a helmet and an axe, a gladiator with a shield and a sword, a spartan with a helmet and a spear, and a centurion with a cape and a banner
+[Complex] a owl with glasses and a graduation cap, a parrot with a pirate hat and a ring, a eagle with a crown and a medal, and a peacock with a tiara and a fan
+[Complex] a bear with a fishing hat and a rod, a fox with a detective hat and a magnifying glass, a wolf with a crown and a throne, and a deer with a scarf and antler decorations
+[Complex] a boy with a superhero cape and a mask, a girl with a princess crown and a wand, a man with a detective hat and a magnifying glass, and a woman with a artist beret and a palette
+[Complex] a cat with a top hat and a monocle, a dog with a bowler hat and a pipe, a rabbit with a beret and a scarf, and a fox with a fedora and a cane

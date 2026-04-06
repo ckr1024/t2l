@@ -309,7 +309,7 @@ def cal_threshold(img):
     """
     img = img.detach().cpu().numpy().transpose(1,2,0)
     img = (img * 255).astype(np.uint8)
-    # 先进行高斯滤波，再使用Otsu阈值法
+    # Gaussian smoothing followed by Otsu thresholding
     blur = cv2.GaussianBlur(img, (5, 5), 0)
     blur = blur.astype("uint8")
     ret3, th3 = cv2.threshold(blur, 0, 1, cv2.THRESH_BINARY + cv2.THRESH_OTSU)

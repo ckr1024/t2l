@@ -28,7 +28,7 @@ from torchvision import transforms as T
 logger = logging.get_logger(__name__)
 
 
-# --------------------base的token merge方法--------------------
+# --------------------Euclidean token merge--------------------
 def token_merge(
     prompt_embeds: torch.Tensor, idx_merge: List[List[int]]
 ) -> torch.Tensor:
@@ -49,28 +49,22 @@ def token_merge(
 
     return prompt_embeds
 
-# --------------------欧式空间的对比学习--------------------
+# --------------------Euclidean contrastive loss--------------------
 def contrastive_loss(
     query_vec: torch.Tensor,
     target_anchor: torch.Tensor,
     other_anchors: list[torch.Tensor],
     temp: float = 0.07
 ) -> torch.Tensor:
-    """
-    自动区分正负样本:
-      1) 计算 stoken 与所有 anchor 的余弦相似度
-      2) 选与 stoken 相似度最高的那个 anchor 作为正样本 (pos)
-      3) 其余 anchor 全部视作负样本 (neg)
-      4) 用 InfoNCE-like 公式做对比学习
-    """
+    """InfoNCE-style contrastive loss in Euclidean space."""
     device = query_vec.device
     query_ = query_vec.unsqueeze(0)  # (1, dim)
 
-    # 如果没有负样本，直接不做对比(返回 0)
+    
     if len(other_anchors) == 0:
         return torch.tensor(0.0).to(device)
 
-    # 4) InfoNCE-like损失
+    
     sim_pos = F.cosine_similarity(query_, target_anchor, dim=-1)  # (1,)
     sim_neg_list = []
     for n_vec in other_anchors:
@@ -84,7 +78,7 @@ def contrastive_loss(
     return loss_cont.squeeze(0).mean()
 
 
-# --------------------双曲空间中的对比学习--------------------
+# --------------------Hyperbolic contrastive loss--------------------
 def contrastive_loss_hyperspace(
     query_vec: torch.Tensor,
     target_anchor: torch.Tensor,
@@ -106,9 +100,7 @@ def contrastive_loss_hyperspace(
         dist_neg_list.append(hyperbolic_distance(query_vec, n_vec, c = 1))  
     dist_neg = torch.stack(dist_neg_list, dim=0) 
     numerator = torch.exp(-dist_pos / temp) 
-    print(f'numerator is {numerator}')
     denominator = numerator + torch.exp(-dist_neg / temp).sum(dim=0) 
-    print(f'denominator is {denominator}')
     loss_cont = -torch.log(numerator / (denominator + 1e-8) + 1e-8)  
     return loss_cont.mean()  
 
@@ -121,7 +113,7 @@ BALL_EPS = {torch.float16: 4e-3, torch.float32: 1e-5}
 
 
 
-# --------------------一些映射函数--------------------
+# --------------------Mapping functions--------------------
 class Artanh(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x):
@@ -168,7 +160,7 @@ def tan(x):
 
 
 
-# --------------------欧式空间到双曲空间--------------------
+# --------------------Exponential map: Euclidean -> Poincaré ball--------------------
 def exp_map(u):
     c = 1
     sqrt_c = c ** 0.5
@@ -176,7 +168,7 @@ def exp_map(u):
     gamma_1 = tanh(sqrt_c * u_norm) * u / (sqrt_c * u_norm)
     return project(gamma_1, c)
 
-# --------------------双曲空间到欧式空间--------------------
+# --------------------Logarithmic map: Poincaré ball -> Euclidean--------------------
 def log_map_lorentz(y):
     c = 1
     sqrt_c = c ** 0.5
@@ -193,7 +185,7 @@ def project(x, c = 1):
     return torch.where(cond, projected, x)
 
 
-# --------------------双曲空间中的莫比乌斯加法--------------------
+# --------------------Möbius addition on Poincaré ball--------------------
 def mobius_addition(x, y):
     c = 1
     x2 = torch.sum(x * x, dim=-1, keepdim=True)
@@ -204,9 +196,9 @@ def mobius_addition(x, y):
     return num / denom.clamp_min(MIN_NORM)
 
 
-# --------------------双曲空间中的距离--------------------
+# --------------------Geodesic distance on Poincaré ball--------------------
 def hyperbolic_distance(x, y, c=1, eval_mode=False):
-    # 这里将距离的计算换成torch.64，否则会出现nan
+    
     sqrt_c = c ** 0.5
     mobius_minus_x = -x  
     minus_x_oplus_y = mobius_addition(mobius_minus_x.to(dtype=torch.float64), y.to(dtype=torch.float64))
@@ -219,7 +211,7 @@ def hyperbolic_distance(x, y, c=1, eval_mode=False):
     dist = 2 / sqrt_c * (torch.atanh(sqrt_c * pairwise_norm).to(dtype=torch.float64))
     return dist.to(dtype=torch.float64)
 
-# --------------------prompt embedding的正余弦编码--------------------
+# --------------------Sinusoidal positional encoding--------------------
 class SinusoidalPositionalEncoding(nn.Module):
     def __init__(self, embed_dim: int, max_length: int = 128):
         super().__init__()
@@ -231,24 +223,22 @@ class SinusoidalPositionalEncoding(nn.Module):
         pe = torch.zeros(max_length, embed_dim)
         pe[:, 0::2] = torch.sin(position * div_term)  
         pe[:, 1::2] = torch.cos(position * div_term) 
-        self.register_buffer('pe', pe)  # 保存在模型中，但不参与训练
+        self.register_buffer('pe', pe)
 
     def forward(self, position_ids: torch.Tensor) -> torch.Tensor:
-        """
-        根据输入的位置 ID 提取正弦位置编码。
-        """
+        """Retrieve positional encodings for given position IDs."""
         pe_on_device = self.pe.to(position_ids.device)
         return pe_on_device[position_ids]
 
 
-# --------------------双曲空间中的带位置编码的token merging方式--------------------
+# --------------------Hyperbolic-Euclidean token merging with positional encoding--------------------
 class TokenMergerWithAttnHyperspace(nn.Module):
     def __init__(
         self,
         embed_dim: int = 2048,
         num_heads: int = 8,
         max_length: int = 128,
-        c: float = 1.0  # 曲率参数
+        c: float = 1.0
     ):
         super().__init__()
         self.c = c
@@ -267,18 +257,14 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         pos = torch.arange(seq_len, device=device, dtype=torch.int)
         pos_encoding = self.pos_encoding(pos).to(device=device, dtype=dtype).unsqueeze(0)  # (1, seq_len, dim)
 
-        # # 欧式空间中prompt_embedding的位置编码
-        # prompt_embeds = prompt_embeds + pos_encoding
-        
-        # 双曲空间中prompt_embedding的位置编码
+        # Hyperbolic positional encoding via Möbius addition
         pos_encoding_hyper = exp_map(pos_encoding).to(device=device, dtype=dtype)
         prompt_embeds_hyper = exp_map(prompt_embeds).to(device=device, dtype=dtype)
 
 
-        # 在超空间中执行Möbius加法
         prompt_embeds_hyper = mobius_addition(prompt_embeds_hyper, pos_encoding_hyper)
 
-        # --------------------双曲空间 & 欧式空间的token merging--------------------
+        # Dual-space token merging
         for idxs in idx_merge:
             noun_indices = idxs[0]  # list[int]
             attr_indices = idxs[1]  # list[int]
@@ -307,8 +293,6 @@ class TokenMergerWithAttnHyperspace(nn.Module):
                 self.beta  * attr_vectors.sum(dim=1),
             )
             merged_sum_2 = self.alpha * merged_vector_2.sum(dim=1) + self.beta  * attr_vectors_2.sum(dim=1)
-            # print(f"after weighted summation: {merged_sum.shape}")
-
             noun_main_idx = noun_indices[0]
             prompt_embeds_hyper[:, noun_main_idx, :] = merged_sum
             prompt_embeds[:, noun_main_idx, :] = merged_sum_2
@@ -321,7 +305,7 @@ class TokenMergerWithAttnHyperspace(nn.Module):
         prompt_embeds_hyper = log_map_lorentz(prompt_embeds_hyper)
         prompt_embeds_hyper = prompt_embeds_hyper.squeeze(0)
         prompt_embeds = prompt_embeds.squeeze(0)
-        # --------------------双曲空间 & 欧式空间的token embedding的加权和--------------------
+        # Geometry-aware fusion: Euclidean + gamma * log_map(Hyperbolic)
         return prompt_embeds + 0.1 * prompt_embeds_hyper
 
 
@@ -609,17 +593,13 @@ class geobindPipeline(StableDiffusionXLPipeline):
             loss = self._entropy_loss(
                 attention_store, indices_to_alter, attention_res, pose_loss=pose_loss
             )
-            print(f'iterative refinement loss is {loss}')
-            if loss != 0:  # and t/1000 > 0.8:
+            if loss != 0:
                 latents = self._update_latent(latents, loss, step_size)
                 text_embeddings = self._update_text(text_embeddings, loss, step_size)
 
             if loss < threshold:
                 break
             if iteration >= max_refinement_steps:
-                print(
-                    f"Entropy loss optimization Exceeded max number of iterations ({max_refinement_steps}) "
-                )
                 break
 
         return latents, loss, text_embeddings.detach()
@@ -656,7 +636,6 @@ class geobindPipeline(StableDiffusionXLPipeline):
             ).sample
         while True:
             iteration += 1
-            # print(f'stoken for noise is is {stoken}')
             noise_pred_token = self.unet(
                 latents,
                 t,
@@ -667,29 +646,20 @@ class geobindPipeline(StableDiffusionXLPipeline):
             ).sample
         
             loss_mse = torch.nn.functional.mse_loss(noise_pred_token, noise_pred_anchor)
-            # print(f'loss_mse is {loss_mse}')
-            use_our_method = True
-            # ---------------------------------双曲空间中的对比学习
+            # Hyperbolic contrastive loss (L_hyp)
             if use_our_method:
-                # print(f'stoken for contrastive learning is {stoken}')
                 loss_cont = contrastive_loss_hyperspace(
                      stoken,
                      prompt_anchor,
                      other_anchors,
                      temp=temperature
                  )
-                print(f'loss_mse loss is {loss_mse}')
-                print(f'loss_cont loss is {loss_cont}')
                 total_loss = lambda_mse * loss_mse + lambda_cont * loss_cont
-                print(f'total_loss is {total_loss}')
             else:
                 total_loss = loss_mse
 
             stoken = self._update_stoken(stoken, total_loss, 10000)
             if iteration >= iter_num:
-                print(
-                    f"Semantic binding loss optimization Exceeded max number of iterations ({iter_num}) "
-                )
                 break
 
         with torch.no_grad():
@@ -913,10 +883,9 @@ class geobindPipeline(StableDiffusionXLPipeline):
         # token merge
         use_our_method = True
         if use_our_method:
-            #修改1,2使用的地方
+            
             merger = TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8, max_length=128)
             if not run_standard_sd and token_refinement_steps:
-                print(f'prompt_embeds shape is {prompt_embeds.shape}')
                 prompt_embeds[0] = merger(prompt_embeds[0], indices_to_alter)
         else:
             if not run_standard_sd and token_refinement_steps:
@@ -1088,17 +1057,12 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                 prompt_length + 1 :]
                         if i < token_control:
                             for idx, panchor in enumerate(panchors):
-                                # print(f'prompt_embeds is {prompt_embeds}')
-                                # print(f'indices_to_alter[idx][0][0] is {indices_to_alter[idx][0][0]}')
-                                # print(f'prompt_embeds[1, indices_to_alter[idx][0][0]] is {prompt_embeds[1, indices_to_alter[idx][0][0]]}')
                                 stoken = (
                                     prompt_embeds[1, indices_to_alter[idx][0][0]]
                                     .detach()
                                     .clone()
                                 )
-                                # print(f'stoken for self.opt_token is {stoken}')
                                 other_panchors = [p for i, p in enumerate(panchors) if i != idx]
-                                # print(f'stoken input is {stoken}')
                                 stoken, latent_anchor[idx] = self.opt_token(
                                     latent_anchor[idx],
                                     t,
@@ -1125,8 +1089,6 @@ class geobindPipeline(StableDiffusionXLPipeline):
                                     pose_loss=use_pose_loss,
                                 )
                             )
-
-                            print(f"Iteration {i} | Loss: {loss:0.4f}")
 
                 latent_model_input = (
                     torch.cat([latents_up] * 2)

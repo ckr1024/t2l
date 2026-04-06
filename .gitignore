@@ -18,10 +18,16 @@ venv/
 .DS_Store
 Thumbs.db
 
-# Model cache
+# Model weights
 *.safetensors
 *.bin
 *.ckpt
 *.pt
 *.pth
 
+# Evaluation outputs (generated at runtime)
+eval_results/
+eval_results_*/
+
+# Logs
+*.log

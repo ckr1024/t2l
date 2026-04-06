@@ -1,28 +1,23 @@
 #!/usr/bin/env python
 """
-Object Binding Benchmark — Image Generation
+GOB-Bench — Object Binding Image Generation
 =============================================
-Generates images for the GPT-4o object binding benchmark (50 prompts).
-Supports ToMe, GeoBind_v2 and SDXL baseline.
+Generate images for the GOB-Bench benchmark (200 prompts, 4 difficulty levels).
+Object binding: each object has sub-objects/accessories that must be
+correctly bound (e.g., "hat" belongs to "dog", not "cat").
 
-Key differences from attribute binding (run_compbench_eval_v2.py / run_geobind_v2.py):
-  - Manual prompt parsing (no spaCy), since object binding follows a fixed template
-  - eot_replace_step=15  (earlier ETS, Config1-style)
-  - use_pose_loss=True   (widens distance between subjects)
-  - attention_refinement_steps=[6, 6]
+Uses template-based parsing (not SpaCy) since object binding prompts
+follow "a X with Y" patterns where "with/wearing" creates pobj
+dependencies that SpaCy's amod extractor does not capture.
 
-Method-specific parameters:
-  ToMe:       tome_control_steps=[7,7],   token_refinement=3, merge_weights=1.0
-  GeoBind_v2: tome_control_steps=[10,12], token_refinement=4, hyper_weight=0.15
-
-Usage
------
+Usage:
     python run_object_binding_generate.py
-    python run_object_binding_generate.py --methods ToMe GeoBind_v2 SDXL
-    python run_object_binding_generate.py --seed 42 --output_dir obj_bind_results
+    python run_object_binding_generate.py --methods GeoBind ToMe SDXL
+    python run_object_binding_generate.py --levels Easy Medium --seed 42
 """
 
 import os
+import re
 import sys
 import json
 import logging
@@ -36,187 +31,231 @@ from tqdm import tqdm
 
 from utils.ptp_utils import AttentionStore, register_attention_control
 
-METHODS = ["SDXL", "ToMe", "GeoBind_v2"]
+METHODS = ["SDXL", "ToMe", "GeoBind"]
+LEVELS = ["Easy", "Medium", "Hard", "Complex"]
+GOB_BENCH_FILE = os.path.join("supplementary", "gob_bench_prompts.txt")
 
 _PIPELINE_FOR_METHOD = {
     "SDXL": "tome",
     "ToMe": "tome",
-    "GeoBind_v2": "geobind",
+    "GeoBind": "geobind",
 }
 
-# 50 object binding prompts following the paper's GPT-4o benchmark template:
-#   "a [objectA] with [itemA] and a [objectB] with [itemB]"
-OBJECT_BINDING_BENCHMARK = [
-    {"objectA": "cat", "itemA": "sunglasses", "objectB": "dog", "itemB": "hat"},
-    {"objectA": "dog", "itemA": "scarf", "objectB": "cat", "itemB": "hat"},
-    {"objectA": "boy", "itemA": "glasses", "objectB": "girl", "itemB": "earrings"},
-    {"objectA": "man", "itemA": "hat", "objectB": "woman", "itemB": "necklace"},
-    {"objectA": "cat", "itemA": "scarf", "objectB": "dog", "itemB": "tie"},
-    {"objectA": "fox", "itemA": "sunglasses", "objectB": "deer", "itemB": "crown"},
-    {"objectA": "bear", "itemA": "hat", "objectB": "man", "itemB": "glasses"},
-    {"objectA": "tiger", "itemA": "glasses", "objectB": "dog", "itemB": "hat"},
-    {"objectA": "boy", "itemA": "hat", "objectB": "corgi", "itemB": "sunglasses"},
-    {"objectA": "lion", "itemA": "crown", "objectB": "sheep", "itemB": "scarf"},
-    {"objectA": "cat", "itemA": "hat", "objectB": "rabbit", "itemB": "glasses"},
-    {"objectA": "man", "itemA": "watch", "objectB": "woman", "itemB": "earrings"},
-    {"objectA": "owl", "itemA": "glasses", "objectB": "cat", "itemB": "hat"},
-    {"objectA": "monkey", "itemA": "hat", "objectB": "elephant", "itemB": "glasses"},
-    {"objectA": "girl", "itemA": "necklace", "objectB": "boy", "itemB": "watch"},
-    {"objectA": "penguin", "itemA": "scarf", "objectB": "panda", "itemB": "hat"},
-    {"objectA": "horse", "itemA": "mask", "objectB": "dog", "itemB": "cape"},
-    {"objectA": "wolf", "itemA": "crown", "objectB": "fox", "itemB": "scarf"},
-    {"objectA": "man", "itemA": "tie", "objectB": "woman", "itemB": "hat"},
-    {"objectA": "parrot", "itemA": "crown", "objectB": "owl", "itemB": "glasses"},
-    {"objectA": "cat", "itemA": "cape", "objectB": "dog", "itemB": "scarf"},
-    {"objectA": "bear", "itemA": "sunglasses", "objectB": "deer", "itemB": "hat"},
-    {"objectA": "girl", "itemA": "earrings", "objectB": "boy", "itemB": "glasses"},
-    {"objectA": "tiger", "itemA": "crown", "objectB": "lion", "itemB": "glasses"},
-    {"objectA": "rabbit", "itemA": "hat", "objectB": "squirrel", "itemB": "scarf"},
-    {"objectA": "woman", "itemA": "glasses", "objectB": "man", "itemB": "scarf"},
-    {"objectA": "dog", "itemA": "tie", "objectB": "cat", "itemB": "hat"},
-    {"objectA": "elephant", "itemA": "hat", "objectB": "monkey", "itemB": "sunglasses"},
-    {"objectA": "fox", "itemA": "glasses", "objectB": "wolf", "itemB": "hat"},
-    {"objectA": "boy", "itemA": "cape", "objectB": "girl", "itemB": "crown"},
-    {"objectA": "duck", "itemA": "hat", "objectB": "penguin", "itemB": "scarf"},
-    {"objectA": "cat", "itemA": "crown", "objectB": "dog", "itemB": "necklace"},
-    {"objectA": "man", "itemA": "helmet", "objectB": "woman", "itemB": "glasses"},
-    {"objectA": "horse", "itemA": "hat", "objectB": "dog", "itemB": "vest"},
-    {"objectA": "panda", "itemA": "sunglasses", "objectB": "bear", "itemB": "hat"},
-    {"objectA": "girl", "itemA": "hat", "objectB": "boy", "itemB": "scarf"},
-    {"objectA": "lion", "itemA": "hat", "objectB": "tiger", "itemB": "scarf"},
-    {"objectA": "cat", "itemA": "glasses", "objectB": "rabbit", "itemB": "hat"},
-    {"objectA": "woman", "itemA": "necklace", "objectB": "girl", "itemB": "earrings"},
-    {"objectA": "owl", "itemA": "hat", "objectB": "parrot", "itemB": "scarf"},
-    {"objectA": "man", "itemA": "sunglasses", "objectB": "boy", "itemB": "hat"},
-    {"objectA": "dog", "itemA": "crown", "objectB": "cat", "itemB": "cape"},
-    {"objectA": "deer", "itemA": "glasses", "objectB": "fox", "itemB": "hat"},
-    {"objectA": "bear", "itemA": "scarf", "objectB": "wolf", "itemB": "glasses"},
-    {"objectA": "squirrel", "itemA": "hat", "objectB": "monkey", "itemB": "glasses"},
-    {"objectA": "woman", "itemA": "hat", "objectB": "man", "itemB": "tie"},
-    {"objectA": "corgi", "itemA": "hat", "objectB": "cat", "itemB": "sunglasses"},
-    {"objectA": "tiger", "itemA": "hat", "objectB": "bear", "itemB": "crown"},
-    {"objectA": "girl", "itemA": "glasses", "objectB": "boy", "itemB": "tie"},
-    {"objectA": "elephant", "itemA": "crown", "objectB": "horse", "itemB": "hat"},
-]
-
-
-# ═══════════════════════════════════════════════════════════════
-#  Logging
-# ═══════════════════════════════════════════════════════════════
 
 def setup_logging(output_dir):
     os.makedirs(output_dir, exist_ok=True)
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = os.path.join(output_dir, f"generate_log_{ts}.txt")
-
     fmt = logging.Formatter("%(asctime)s | %(message)s", datefmt="%H:%M:%S")
     fh = logging.FileHandler(log_path, encoding="utf-8")
     fh.setFormatter(fmt)
     sh = logging.StreamHandler(sys.stdout)
     sh.setFormatter(fmt)
-
-    logger = logging.getLogger("objbind")
+    logger = logging.getLogger("gobbench")
     logger.setLevel(logging.INFO)
     logger.handlers.clear()
     logger.addHandler(fh)
     logger.addHandler(sh)
-    logger.info(f"Logging to {log_path}")
     return logger
 
 
-log = logging.getLogger("objbind")
+log = logging.getLogger("gobbench")
 
 
 # ═══════════════════════════════════════════════════════════════
-#  CLI
+#  GOB-Bench prompt loading
 # ═══════════════════════════════════════════════════════════════
 
-def parse_args():
-    p = argparse.ArgumentParser(
-        description="Object Binding Benchmark — Image Generation")
-    p.add_argument("--methods", nargs="+", default=["ToMe"],
-                   choices=METHODS, help="Methods to generate images for")
-    p.add_argument("--model_path", default="stabilityai/stable-diffusion-xl-base-1.0")
-    p.add_argument("--output_dir", default="eval_results_object_binding")
-    p.add_argument("--n_inference_steps", type=int, default=50)
-    p.add_argument("--seed", type=int, default=43)
-    p.add_argument("--guidance_scale", type=float, default=7.5)
-    p.add_argument("--eot_replace_step", type=int, default=15)
-    p.add_argument("--hyper_weight", type=float, default=0.15,
-                   help="Hyperbolic geometry contribution weight for GeoBind_v2")
-    return p.parse_args()
+def load_gob_bench(filepath, levels=None):
+    """Load GOB-Bench prompts from file, optionally filtering by level."""
+    prompts = []
+    with open(filepath) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            for level in LEVELS:
+                prefix = f"[{level}]"
+                if line.startswith(prefix):
+                    prompt_text = line[len(prefix):].strip()
+                    if levels is None or level in levels:
+                        prompts.append({
+                            "level": level,
+                            "prompt": prompt_text,
+                        })
+                    break
+    return prompts
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Prompt helpers
+#  Template-based prompt parsing for object binding
 # ═══════════════════════════════════════════════════════════════
 
-def build_prompt(entry):
-    """Construct the text prompt from a benchmark entry."""
-    return (f"a {entry['objectA']} with {entry['itemA']} "
-            f"and a {entry['objectB']} with {entry['itemB']}")
+def _split_into_entities(prompt):
+    """Split an object binding prompt into entity segments.
+
+    Only starts a new entity when "a/an X with/wearing" is found,
+    so items like "and a scarf" (no "with") stay with the previous entity.
+
+    Handles patterns like:
+      "a X with Y and a Z with W"
+      "a X with Y and Z, and a Z with W and V"
+      "a X with Y, a Z with W, and a V with U"
+    """
+    prompt_clean = prompt.strip()
+
+    # Find entity anchors: "a/an [noun] with/wearing"
+    # Each entity must contain "with" or "wearing" to qualify
+    pattern = (
+        r'(?:^|[,]?\s+(?:and\s+)?)'
+        r'((?:a|an)\s+[\w\s]+?\s+(?:with|wearing)\s+)'
+    )
+    anchors = list(re.finditer(pattern, prompt_clean, re.IGNORECASE))
+
+    if not anchors:
+        return [prompt_clean]
+
+    segments = []
+    for i, match in enumerate(anchors):
+        # Entity starts at the "a/an" part
+        start = match.start(1) if match.group(1) else match.start()
+        if i + 1 < len(anchors):
+            end = anchors[i + 1].start()
+        else:
+            end = len(prompt_clean)
+        segment = prompt_clean[start:end].strip().rstrip(",").strip()
+        if segment:
+            segments.append(segment)
+
+    return segments
+
+
+def _parse_entity_segment(segment):
+    """Parse a single entity segment like 'a cat with sunglasses and a scarf'.
+
+    Returns (object_word, [item_words]).
+    """
+    # Find "with" or "wearing" keyword
+    for kw in ["wearing", "with"]:
+        kw_idx = segment.lower().find(f" {kw} ")
+        if kw_idx >= 0:
+            obj_part = segment[:kw_idx].strip()
+            items_part = segment[kw_idx + len(kw) + 2:].strip()
+
+            # Remove leading article from object
+            obj_word = re.sub(r'^(?:a|an)\s+', '', obj_part).strip()
+
+            # Split items by " and "
+            items = [item.strip().lstrip("a ").lstrip("an ")
+                     for item in re.split(r'\s+and\s+', items_part)
+                     if item.strip()]
+            # Clean up articles from items
+            clean_items = []
+            for item in items:
+                item = re.sub(r'^(?:a|an)\s+', '', item).strip()
+                if item:
+                    clean_items.append(item)
+
+            return obj_word, clean_items
+
+    # Fallback: no "with"/"wearing" found, treat whole thing as object
+    obj_word = re.sub(r'^(?:a|an)\s+', '', segment).strip()
+    return obj_word, []
 
 
 def parse_object_binding_prompt(prompt, tokenizer):
-    """Parse an object binding prompt for token merging.
+    """Parse an object binding prompt into token indices for merging.
 
-    Expected format: "a {obj1} with {item1} and a {obj2} with {item2}"
+    Produces the same format as RunConfig1 in demo_config.py:
+      token_indices = [[[noun_pos], [kw_pos, item_pos, ...]], ...]
 
-    Unlike attribute binding which uses spaCy for automatic NP extraction,
-    object binding uses a fixed template and manual index computation.
-    This mirrors RunConfig1's use_nlp=False approach.
+    The "with/wearing" keyword IS included in attr group so it gets
+    zeroed out after merging (same as "wearing" in RunConfig1).
 
     Returns (token_indices, prompt_anchor, prompt_merged, prompt_length).
     """
+    segments = _split_into_entities(prompt)
+    entities = [_parse_entity_segment(seg) for seg in segments]
+
+    # Build word → CLIP token position mapping
     words = prompt.split()
-    and_word_idx = words.index("and")
+    tok_pos = 1  # position 0 = SOT
+    word_map = []  # [(raw_word, clean_lower, [token_positions])]
+    for w in words:
+        clean = w.strip(".,;:!?")
+        n = len(tokenizer.encode(clean)) - 2
+        word_map.append((w, clean.lower(), list(range(tok_pos, tok_pos + n))))
+        tok_pos += n
 
-    # Map each word to its CLIP token positions (1-based, since 0 = SOT)
-    pos = 1
-    word_positions = []
-    for word in words:
-        ids = tokenizer.encode(word)
-        n_tokens = len(ids) - 2  # exclude SOT and EOT
-        word_positions.append(list(range(pos, pos + n_tokens)))
-        pos += n_tokens
+    prompt_length = tok_pos - 1
 
-    prompt_length = pos - 1
+    token_indices = []
+    prompt_anchor = []
+    entity_names = []
+    used = set()  # word indices already claimed
 
-    # Verify against full-prompt tokenization
-    full_ids = tokenizer.encode(prompt)
-    expected_length = len(full_ids) - 2
-    if prompt_length != expected_length:
-        log.warning(
-            f"Token count mismatch for '{prompt}': "
-            f"word-by-word={prompt_length}, full={expected_length}. "
-            f"Using full tokenization count."
-        )
-        prompt_length = expected_length
+    for seg_idx, (obj_word, item_words) in enumerate(entities):
+        obj_key = obj_word.lower().split()[-1]
 
-    # Entity 1: "a OBJ with ITEM" — noun = word[1], attrs = words[2..and)
-    noun1_positions = word_positions[1]
-    attr1_positions = []
-    for i in range(2, and_word_idx):
-        attr1_positions.extend(word_positions[i])
+        # --- find noun word (first unused match after previous entities) ---
+        noun_wi = None
+        for wi, (_, wl, _) in enumerate(word_map):
+            if wl == obj_key and wi not in used:
+                noun_wi = wi
+                used.add(wi)
+                break
+        if noun_wi is None:
+            prompt_anchor.append(segments[seg_idx])
+            entity_names.append(obj_key)
+            continue
 
-    # Entity 2: "a OBJ with ITEM" — noun = word[and+2], attrs = words[and+3..)
-    noun2_positions = word_positions[and_word_idx + 2]
-    attr2_positions = []
-    for i in range(and_word_idx + 3, len(words)):
-        attr2_positions.extend(word_positions[i])
+        noun_positions = list(word_map[noun_wi][2])
 
-    token_indices = [
-        [noun1_positions, attr1_positions],
-        [noun2_positions, attr2_positions],
-    ]
+        # Handle compound noun (e.g., "polar bear" → noun = both words)
+        obj_parts = obj_word.lower().split()
+        if len(obj_parts) > 1:
+            for part in obj_parts[:-1]:
+                for wi2, (_, wl2, pos2) in enumerate(word_map):
+                    if wl2 == part and wi2 not in used and wi2 < noun_wi:
+                        noun_positions = list(pos2) + noun_positions
+                        used.add(wi2)
+                        break
 
-    anchor1 = " ".join(words[:and_word_idx])
-    anchor2 = " ".join(words[and_word_idx + 1:])
-    prompt_anchor = [anchor1, anchor2]
+        # --- find "with/wearing" keyword right after noun ---
+        attr_positions = []
+        for offset in range(1, 4):
+            kwi = noun_wi + offset
+            if kwi < len(word_map) and word_map[kwi][1] in ("with", "wearing") \
+                    and kwi not in used:
+                attr_positions.extend(word_map[kwi][2])
+                used.add(kwi)
+                break
 
-    noun1_text = words[1]
-    noun2_text = words[and_word_idx + 2]
-    prompt_merged = f"a {noun1_text} and a {noun2_text}"
+        # --- find each item word after noun ---
+        for item in item_words:
+            for part in item.lower().split():
+                for wi, (_, wl, positions) in enumerate(word_map):
+                    if wl == part and wi not in used and wi > noun_wi:
+                        attr_positions.extend(positions)
+                        used.add(wi)
+                        break
+
+        if noun_positions and attr_positions:
+            token_indices.append([noun_positions, sorted(attr_positions)])
+
+        prompt_anchor.append(segments[seg_idx])
+        entity_names.append(obj_key)
+
+    # Simplified prompt for ETS (entity names only)
+    if len(entity_names) == 0:
+        prompt_merged = prompt
+    elif len(entity_names) == 1:
+        prompt_merged = f"a {entity_names[0]}"
+    elif len(entity_names) == 2:
+        prompt_merged = f"a {entity_names[0]} and a {entity_names[1]}"
+    else:
+        parts = [f"a {n}" for n in entity_names]
+        prompt_merged = ", ".join(parts[:-1]) + ", and " + parts[-1]
 
     return token_indices, prompt_anchor, prompt_merged, prompt_length
 
@@ -226,7 +265,6 @@ def parse_object_binding_prompt(prompt, tokenizer):
 # ═══════════════════════════════════════════════════════════════
 
 def _load_pipeline(pipe_type, model_path, device):
-    """Load pipeline by type. Returns (pipeline, extras_dict)."""
     extras = {}
     if pipe_type == "tome":
         from pipe_tome import tomePipeline
@@ -235,12 +273,16 @@ def _load_pipeline(pipe_type, model_path, device):
             safety_checker=None,
         ).to(device)
     elif pipe_type == "geobind":
-        from pipe_geobind import geobindPipeline, TokenMergerWithAttnHyperspace
+        from pipe_geobind import geobindPipeline
+        from utils.hyperbolic_utils import TokenMergerWithAttnHyperspace
         pipe = geobindPipeline.from_pretrained(
             model_path, torch_dtype=torch.float16, variant="fp16",
             safety_checker=None,
         ).to(device)
-        extras["TokenMergerClass"] = TokenMergerWithAttnHyperspace
+        extras["hyper_merger"] = (
+            TokenMergerWithAttnHyperspace(embed_dim=2048, num_heads=8)
+            .to(device).eval()
+        )
     else:
         raise ValueError(f"Unknown pipe_type: {pipe_type}")
 
@@ -251,7 +293,6 @@ def _load_pipeline(pipe_type, model_path, device):
 
 def _build_call_kwargs(method, prompt, args, ti, pa, merged, pl,
                        controller, thresholds, extras=None):
-    """Build pipeline call kwargs, adapting for method-specific parameters."""
     run_standard = (method == "SDXL") or (not ti)
 
     base = dict(
@@ -268,106 +309,91 @@ def _build_call_kwargs(method, prompt, args, ti, pa, merged, pl,
         scale_range=(1.0, 0.0),
         prompt3=merged,
         prompt_length=pl,
-        eot_replace_step=args.eot_replace_step,
-        use_pose_loss=True,
+        token_refinement_steps=3,
         attention_refinement_steps=[6, 6],
+        tome_control_steps=[7, 7],
+        eot_replace_step=15,
+        use_pose_loss=True,
         negative_prompt="low res, ugly, blurry, artifact, unreal",
     )
 
-    if method in ("SDXL", "ToMe"):
-        # ToMe / SDXL — use tomePipeline kwargs
-        base.update(
-            token_refinement_steps=3,
-            tome_control_steps=[7, 7],
-            merge_noun_weight=1.0,
-            merge_attr_weight=1.0,
-            use_hyperbolic=False,
-            hyper_merger=None,
-        )
-    elif method == "GeoBind_v2":
-        # GeoBind v2 — more aggressive control, hyperbolic geometry merger
-        base.update(
-            token_refinement_steps=4,
-            tome_control_steps=[10, 12],
-            hyper_merger=extras.get("hyper_merger") if extras else None,
-        )
+    if method == "ToMe":
+        base["use_hyperbolic"] = False
+        base["hyper_merger"] = None
+        base["merge_noun_weight"] = 1.0
+        base["merge_attr_weight"] = 1.0
+
+    if method == "GeoBind" and extras and "hyper_merger" in extras:
+        base["hyper_merger"] = extras["hyper_merger"]
 
     return base
 
 
 # ═══════════════════════════════════════════════════════════════
-#  Image Generation
+#  Generation
 # ═══════════════════════════════════════════════════════════════
 
-def generate_all_images(args):
+def generate_images(args):
     device = "cuda" if torch.cuda.is_available() else "cpu"
 
-    # Object binding thresholds — from RunConfig1
+    prompts_data = load_gob_bench(args.prompt_file, args.levels)
+    if not prompts_data:
+        log.error(f"No prompts loaded from {args.prompt_file}")
+        return
+
+    for i, p in enumerate(prompts_data):
+        p["index"] = i
+    log.info(f"Loaded {len(prompts_data)} GOB-Bench prompts")
+    for level in LEVELS:
+        count = sum(1 for p in prompts_data if p["level"] == level)
+        if count > 0:
+            log.info(f"  {level}: {count} prompts")
+
+    meta_path = os.path.join(args.output_dir, "gob_bench_meta.json")
+    os.makedirs(args.output_dir, exist_ok=True)
+    with open(meta_path, "w") as f:
+        json.dump(prompts_data, f, indent=2, ensure_ascii=False)
+
     thresholds = {
         0: 26, 1: 25, 2: 24, 3: 23, 4: 22.5,
         5: 22, 6: 21.5, 7: 21, 8: 21, 9: 21,
     }
 
-    # Save prompts metadata for the evaluation script
-    prompts_data = []
-    for idx, entry in enumerate(OBJECT_BINDING_BENCHMARK):
-        prompt = build_prompt(entry)
-        prompts_data.append({"index": idx, "prompt": prompt, **entry})
-
-    prompts_path = os.path.join(args.output_dir, "prompts.json")
-    os.makedirs(args.output_dir, exist_ok=True)
-    with open(prompts_path, "w") as f:
-        json.dump(prompts_data, f, indent=2, ensure_ascii=False)
-    log.info(f"Saved {len(prompts_data)} prompts → {prompts_path}")
-
-    # Group methods by pipeline type to avoid redundant model loading
     pipe_groups = {}
     for m in args.methods:
         pt = _PIPELINE_FOR_METHOD.get(m, "tome")
         pipe_groups.setdefault(pt, []).append(m)
 
     for pipe_type, methods_in_group in pipe_groups.items():
-        log.info(f"Loading '{pipe_type}' pipeline for methods {methods_in_group} …")
+        log.info(f"Loading '{pipe_type}' pipeline for {methods_in_group} ...")
         pipeline, extras = _load_pipeline(pipe_type, args.model_path, device)
-
-        # For GeoBind_v2, create the hyperbolic merger
-        if pipe_type == "geobind" and "TokenMergerClass" in extras:
-            hyper_merger = extras["TokenMergerClass"](
-                embed_dim=2048, num_heads=8, hyper_weight=args.hyper_weight,
-            ).to(device).eval()
-            extras["hyper_merger"] = hyper_merger
-            log.info(f"  TokenMergerWithAttnHyperspace ready "
-                     f"(hyper_weight={args.hyper_weight})")
 
         for method in methods_in_group:
             out_dir = os.path.join(args.output_dir, method, "samples")
             os.makedirs(out_dir, exist_ok=True)
 
             existing = len([f for f in os.listdir(out_dir) if f.endswith(".png")])
-            if existing >= len(OBJECT_BINDING_BENCHMARK):
-                log.info(f"[{method}] {existing} images exist — skipping.")
+            log.info(f"{'='*55}")
+            log.info(f"  {method} ({existing}/{len(prompts_data)} done)")
+            log.info(f"{'='*55}")
+            if existing >= len(prompts_data):
+                log.info("  All images exist -- skipping.")
                 continue
-            log.info(f"[{method}] generating "
-                     f"({existing}/{len(OBJECT_BINDING_BENCHMARK)} done) …")
 
-            n_generated, n_errors = 0, 0
-            for idx, entry in enumerate(
-                tqdm(OBJECT_BINDING_BENCHMARK, desc=f"  {method}")
-            ):
+            n_ok, n_err = 0, 0
+            for entry in tqdm(prompts_data, desc=f"  {method}"):
+                idx = entry["index"]
+                prompt = entry["prompt"]
                 img_path = os.path.join(out_dir, f"{idx:04d}.png")
                 if os.path.exists(img_path):
                     continue
 
-                prompt = build_prompt(entry)
                 g = torch.Generator(device).manual_seed(args.seed)
-
                 try:
                     ti, pa, merged, pl = parse_object_binding_prompt(
-                        prompt, pipeline.tokenizer
-                    )
+                        prompt, pipeline.tokenizer)
                 except Exception:
-                    log.error(f"  Parse error for '{prompt}':\n"
-                              f"{traceback.format_exc()}")
+                    log.warning(f"  Parse fallback for: {prompt}")
                     ti, pa, merged, pl = [], [], prompt, 0
 
                 controller = AttentionStore()
@@ -382,50 +408,50 @@ def generate_all_images(args):
                 try:
                     out = pipeline(**kw)
                     out.images[0].save(img_path)
-                    n_generated += 1
+                    n_ok += 1
                 except Exception as e:
                     tqdm.write(f"    [ERROR] '{prompt}': {e}")
-                    log.error(f"  Generation error [{method}] "
-                              f"'{prompt}': {e}\n{traceback.format_exc()}")
+                    log.error(f"  Error [{method}] '{prompt}': {e}")
                     Image.new("RGB", (1024, 1024), "gray").save(img_path)
-                    n_errors += 1
+                    n_err += 1
 
-            log.info(f"[{method}] done — generated={n_generated}, errors={n_errors}")
+            log.info(f"  [{method}] done -- generated={n_ok}, errors={n_err}")
 
-        log.info(f"Unloading '{pipe_type}' pipeline …")
+        log.info(f"Unloading '{pipe_type}' pipeline ...")
         del pipeline
         if "hyper_merger" in extras:
             del extras["hyper_merger"]
         torch.cuda.empty_cache()
 
-    log.info("Generation phase complete.")
+    log.info("Generation complete.")
 
 
-# ═══════════════════════════════════════════════════════════════
-#  Main
-# ═══════════════════════════════════════════════════════════════
+def parse_args():
+    p = argparse.ArgumentParser(description="GOB-Bench image generation")
+    p.add_argument("--methods", nargs="+", default=["GeoBind"],
+                   choices=METHODS)
+    p.add_argument("--levels", nargs="+", default=None,
+                   choices=LEVELS, help="Filter by difficulty (default: all)")
+    p.add_argument("--prompt_file", default=GOB_BENCH_FILE)
+    p.add_argument("--output_dir", default="eval_results_gob_bench")
+    p.add_argument("--model_path",
+                   default="stabilityai/stable-diffusion-xl-base-1.0")
+    p.add_argument("--n_inference_steps", type=int, default=50)
+    p.add_argument("--seed", type=int, default=42)
+    p.add_argument("--guidance_scale", type=float, default=7.5)
+    return p.parse_args()
+
 
 def main():
     args = parse_args()
     setup_logging(args.output_dir)
-
-    log.info("=== Object Binding Benchmark — Image Generation ===")
+    log.info("=== GOB-Bench Image Generation ===")
     log.info(f"Methods: {args.methods}  |  Seed: {args.seed}")
-    log.info(f"eot_replace_step={args.eot_replace_step}  |  use_pose_loss=True")
-    log.info(f"attention_refinement=[6,6]  |  n_inference_steps={args.n_inference_steps}")
-    for m in args.methods:
-        if m == "ToMe":
-            log.info(f"  {m}: tome_control=[7,7] token_refine=3 merge=1.0/1.0")
-        elif m == "GeoBind_v2":
-            log.info(f"  {m}: tome_control=[10,12] token_refine=4 "
-                     f"hyper_weight={args.hyper_weight}")
-        elif m == "SDXL":
-            log.info(f"  {m}: standard SD baseline (no ToMe)")
-    log.info(f"Output dir: {os.path.abspath(args.output_dir)}")
-    log.info(f"Benchmark size: {len(OBJECT_BINDING_BENCHMARK)} prompts")
+    log.info(f"Levels: {args.levels or 'all'}")
+    log.info(f"Output: {os.path.abspath(args.output_dir)}")
 
     try:
-        generate_all_images(args)
+        generate_images(args)
     except Exception:
         log.error(f"Generation FAILED:\n{traceback.format_exc()}")
 
