@@ -43,7 +43,21 @@ Generate images on color/shape/texture subsets:
 python run_geobind.py --output_dir eval_results --subsets color shape texture
 ```
 
-Evaluate with BLIP-VQA using the official [T2I-CompBench](https://github.com/Karine-Huang/T2I-CompBench) code.
+Evaluate with BLIP-VQA using the official [T2I-CompBench](https://github.com/Karine-Huang/T2I-CompBench) evaluation code:
+
+```bash
+# Set up a separate environment for BLIP-VQA evaluation
+pip install -r requirements-BLIP-VQA
+
+# Clone the official T2I-CompBench repo and run BLIP-VQA
+git clone https://github.com/Karine-Huang/T2I-CompBench.git
+cd T2I-CompBench/BLIPvqa_eval
+python BLIP_vqa.py --out_dir ../../eval_results/GeoBind/color
+python BLIP_vqa.py --out_dir ../../eval_results/GeoBind/texture
+python BLIP_vqa.py --out_dir ../../eval_results/GeoBind/shape
+```
+
+> **Note:** BLIP-VQA requires a different dependency environment (e.g., `transformers==4.30.2`). Use `requirements-BLIP-VQA` instead of `requirements.txt` for this step.
 
 Evaluate with ImageReward:
 ```bash

@@ -38,10 +38,10 @@ Algorithm~\ref{alg:geobind} presents the complete GeoBind inference procedure.
 \State Encode $P \rightarrow C = \{c_1, \ldots, c_L\} \in \mathbb{R}^{L \times d}$ via CLIP
 \State Normalize: $\tilde{C} \leftarrow C / \|C\|_2$
 \State Map to Poincar\'e ball: $C^{\mathcal{H}} \leftarrow \exp_\mathbf{0}^c(\tilde{C})$
-\State Add positional encoding via M\"obius addition (Eq.~5)
+\State Add positional encoding via M\"obius addition (Eq.~10)
 \For{each entity $k = 1, \ldots, K$}
-    \State Euclidean merge: $\hat{c}_k^{\text{E}} \leftarrow \alpha \cdot c_{n_k} + \beta \cdot \sum_{j} c_{a_{k,j}}$ \Comment{Eq.~12}
-    \State Hyperbolic merge: $\hat{c}_k^{\mathcal{H}} \leftarrow$ attention-based fusion in $\mathcal{H}$ \Comment{Eq.~13--14}
+    \State Euclidean merge: $\hat{c}_k^{\text{E}} \leftarrow \alpha \cdot c_{n_k} + \beta \cdot \sum_{j} c_{a_{k,j}}$ \Comment{Eqs.~11, 13}
+    \State Hyperbolic merge: $\hat{c}_k^{\mathcal{H}} \leftarrow$ attention-based fusion in $\mathcal{H}$ \Comment{Eqs.~12, 14}
     \State Geometry-aware fusion: $\hat{c}_k \leftarrow \hat{c}_k^{\text{E}} + \gamma \cdot \log_\mathbf{0}^c(\hat{c}_k^{\mathcal{H}})$ \Comment{Eq.~15}
 \EndFor
 \State Replace original tokens with composite tokens $\{\hat{c}_k\}$
@@ -50,8 +50,8 @@ Algorithm~\ref{alg:geobind} presents the complete GeoBind inference procedure.
 \For{$t = T, T-1, \ldots, 1$}
     \If{$t > T - T_{\text{tok}}$} \Comment{Token optimization phase}
         \For{iter $= 1, \ldots, 3$}
-            \State Compute $\mathcal{L}_{\text{sem}}$ from cross-attention maps \Comment{Eq.~16--17}
-            \State Compute $\mathcal{L}_{\text{hyp}}$ from geodesic distances \Comment{Eq.~9}
+            \State Compute $\mathcal{L}_{\text{sem}}$ from noise predictions \Comment{Eq.~16}
+            \State Compute $\mathcal{L}_{\text{hyp}}$ from geodesic distances \Comment{Eq.~17}
             \State Update $\hat{c}_k \leftarrow \hat{c}_k - \eta \nabla_{\hat{c}_k}(\lambda_1 \mathcal{L}_{\text{sem}} + \lambda_2 \mathcal{L}_{\text{hyp}})$ \Comment{Eq.~18}
         \EndFor
     \EndIf
@@ -115,7 +115,7 @@ We provide the complete implementation details for reproducibility.
 
 \paragraph{Evaluation Seeds.} All experiments use 5 random seeds (42, 123, 456, 789, 1024). We report mean $\pm$ standard deviation.
 
-\paragraph{Hardware.} Experiments are conducted on NVIDIA H200 (141 GB) GPUs. Single-image generation takes 12.8--16.4 seconds depending on entity count (Table~7 in the main paper).
+\paragraph{Hardware.} Experiments are conducted on NVIDIA A100 (80 GB) GPUs. Single-image generation takes 12.8--16.4 seconds depending on entity count (Table~7 in the main paper).
 
 % ============================================================
 \section{Hyperparameter Sensitivity}
@@ -275,7 +275,7 @@ GeoBind is a \textbf{training-free} method: no model weights are updated. All op
 \item \textbf{No learnable parameters}: All projection matrices are identity ($W_Q = W_K = W_V = I$), all geometric operations (exponential map, M\"obius addition, geodesic distance) are closed-form.
 \item \textbf{Inference-time optimization}: During the first 5 denoising steps (out of 50 total), composite tokens are iteratively refined via gradient descent on $\mathcal{L}_{\text{sem}} + \lambda_2 \mathcal{L}_{\text{hyp}}$, and attention maps are refined via $\mathcal{L}_{\text{ent}}$.
 \item \textbf{Runtime overhead}: Compared to standard SDXL generation ($\sim$8.2\,s), GeoBind adds $\sim$4.6--8.2\,s depending on entity count ($K=2$ to $K=5$), primarily from the additional UNet forward passes required for $\mathcal{L}_{\text{sem}}$ computation.
-\item \textbf{Memory}: Peak GPU memory usage is $\sim$18\,GB (SDXL) on H200, dominated by the base model weights. GeoBind's geometric operations add negligible memory overhead ($<$100\,MB).
+\item \textbf{Memory}: Peak GPU memory usage is $\sim$18\,GB (SDXL) on A100, dominated by the base model weights. GeoBind's geometric operations add negligible memory overhead ($<$100\,MB).
 \end{itemize}
 
 % ============================================================
@@ -297,7 +297,6 @@ The submitted code contains the following key files:
 \paragraph{Experiment Scripts.}
 \begin{itemize}
 \item \texttt{run\_geobind.py}: Generate images on T2I-CompBench attribute binding subsets (color, shape, texture).
-\item \texttt{run\_compbench\_eval.py}: Full T2I-CompBench evaluation pipeline (generation + BLIP-VQA scoring) for all methods.
 \item \texttt{run\_object\_binding\_generate.py}: GOB-Bench image generation for all 200 prompts across 4 difficulty levels.
 \item \texttt{run\_object\_binding\_eval.py}: GOB-Bench evaluation with GPT-4o and Qwen2-VL judges, per-difficulty scoring.
 \item \texttt{run\_demo.py}: Interactive demo for comparing SDXL, ToMe, and GeoBind on custom prompts.
@@ -316,7 +315,10 @@ The submitted code contains the following key files:
 \item \texttt{supplementary/gob\_bench\_prompts.txt}: Complete GOB-Bench prompt list (200 prompts, 4 difficulty levels).
 \end{itemize}
 
-Evaluation on T2I-CompBench uses the official evaluation code from~\cite{huang2023t2icompbench}. GOB-Bench evaluation uses GPT-4o and Qwen2-VL APIs as described in Sec.~4.1.
+\paragraph{BLIP-VQA Evaluation.}
+Attribute binding scores (color, texture, shape) are computed using the official BLIP-VQA evaluation script from T2I-CompBench~\cite{huang2023t2icompbench}\footnote{\url{https://github.com/Karine-Huang/T2I-CompBench/tree/main/BLIPvqa_eval}}. Since the BLIP-VQA evaluation requires a different dependency environment (e.g., an older version of \texttt{transformers}), we provide a separate dependency file \texttt{requirements-BLIP-VQA} for setting up this environment. The evaluation workflow is: (1)~generate images using \texttt{run\_geobind.py}; (2)~set up the BLIP-VQA environment; (3)~run the official \texttt{BLIP\_vqa.py} script on the generated images to obtain per-subset BLIP-VQA scores.
+
+GOB-Bench evaluation uses GPT-4o and Qwen2-VL APIs as described in Sec.~4.1 of the main paper.
 
 % ============================================================
 
